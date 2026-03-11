@@ -592,11 +592,11 @@ HBase Architecture (Full Stack):
         <!-- HBASE COMPONENTS -->
         <h2 id="hbase-components">HBase Components Deep Dive</h2>
 
-        <h3>1. HMaster (Master Server)</h3>
+        <h3>1. HMaster (Master Server) - The Manager</h3>
         <div class="architecture-box">
-            <h4>Responsibilities</h4>
+            <h4>Core Responsibilities</h4>
             <ul>
-                <li><strong>Region Assignment:</strong> Decides which RegionServer hosts which region</li>
+                <li><strong>Region Assignment:</strong> Decides which RegionServer hosts which region (including META table region)</li>
                 <li><strong>Load Balancing:</strong> Moves regions to balance load
                     <ul>
                         <li>If RegionServer A has 100 regions and B has 10, move some from A to B</li>
@@ -605,37 +605,120 @@ HBase Architecture (Full Stack):
                 </li>
                 <li><strong>Schema Operations:</strong> Create/delete tables, add/remove column families</li>
                 <li><strong>Region Splitting:</strong> When region grows > 10 GB, split into two</li>
-                <li><strong>Failure Recovery:</strong> Detects dead RegionServers, reassigns their regions</li>
+                <li><strong>Failure Recovery:</strong> Watches ZooKeeper for dead RegionServers, reassigns their regions</li>
                 <li><strong>Monitoring:</strong> Health checks, metrics collection</li>
             </ul>
+
+            <h4>What HMaster Does NOT Do</h4>
+            <ul>
+                <li>❌ <strong>Does NOT track RegionServers directly</strong> - ZooKeeper does this via ephemeral nodes</li>
+                <li>❌ <strong>Does NOT receive heartbeats</strong> - ZooKeeper receives heartbeats from RegionServers</li>
+                <li>❌ <strong>Does NOT detect failures directly</strong> - Gets notifications from ZooKeeper when ephemeral nodes disappear</li>
+                <li>❌ <strong>Does NOT serve data</strong> - Clients talk directly to RegionServers</li>
+                <li>✅ <strong>HMaster WATCHES ZooKeeper</strong> for changes in /hbase/rs/ directory</li>
+            </ul>
+
+            <h4>HMaster's Interaction with ZooKeeper</h4>
+            <div class="visual">
+Failure Detection Flow:
+
+RegionServer 1     ZooKeeper           HMaster
+     │                 │                   │
+     │─ Heartbeat ────→│                   │
+     │  (every 3s)     │                   │
+     │                 │                   │
+     │ [CRASH!]        │                   │
+     │                 │                   │
+     │             [30s timeout]           │
+     │                 │                   │
+     │             [Delete /hbase/rs/RS1] │
+     │                 │                   │
+     │                 │─── Notification ─→│
+     │                 │  "RS1 node gone"  │
+     │                 │                   │
+     │                 │              [HMaster]
+     │                 │              "RS1 died!"
+     │                 │              "Reassign 
+     │                 │               regions"
+     │                 │                   │
+     │                 │←─ Update META ────┤
+     │                 │  location if      │
+     │                 │  needed           │
+            </div>
 
             <h4>High Availability</h4>
             <ul>
                 <li><strong>Active-Standby Setup:</strong> Multiple HMaster instances</li>
-                <li>ZooKeeper elects one as active</li>
-                <li>If active dies, standby takes over (automatic failover)</li>
-                <li><strong>Important:</strong> HMaster is NOT on critical path for reads/writes
+                <li>ZooKeeper elects one as active (writes to /hbase/master znode)</li>
+                <li>If active dies, standby takes over (automatic failover within seconds)</li>
+                <li><strong>CRITICAL:</strong> HMaster is NOT on critical path for reads/writes
                     <ul>
-                        <li>Clients talk directly to RegionServers</li>
-                        <li>If HMaster is down, reads/writes continue!</li>
-                        <li>Only admin operations (create table) are blocked</li>
+                        <li>Clients talk directly to RegionServers (after META lookup)</li>
+                        <li>If HMaster is down, reads/writes continue normally!</li>
+                        <li>Only admin operations (create table, region splits) are blocked</li>
+                        <li>Cluster can run for hours without HMaster (not recommended but possible)</li>
                     </ul>
                 </li>
             </ul>
         </div>
 
-        <h3>2. RegionServer (Worker Server)</h3>
+        <h3>2. RegionServer (Worker Server) - The Data Server</h3>
         <div class="architecture-box">
-            <h4>Responsibilities</h4>
+            <h4>Core Responsibilities</h4>
             <ul>
-                <li><strong>Serve Reads/Writes:</strong> Handle all client requests for assigned regions</li>
-                <li><strong>Region Management:</strong> Host multiple regions (10-100 per server)</li>
+                <li><strong>Serve Reads/Writes:</strong> Handle ALL client requests for assigned regions (this is the critical path!)</li>
+                <li><strong>Region Management:</strong> Host multiple regions (typically 100-1000 per server)</li>
+                <li><strong>Heartbeat to ZooKeeper:</strong> Send session heartbeat every ~3 seconds to prove "I'm alive"</li>
                 <li><strong>MemStore Management:</strong> In-memory write buffer (one per column family per region)</li>
-                <li><strong>Flush Operations:</strong> When MemStore full, flush to HFile</li>
-                <li><strong>Compaction:</strong> Minor and major compactions to merge HFiles</li>
-                <li><strong>WAL:</strong> Write-ahead log for durability</li>
-                <li><strong>BlockCache:</strong> LRU cache for frequently accessed blocks</li>
+                <li><strong>Flush Operations:</strong> When MemStore full (128 MB default), flush to HFile on HDFS</li>
+                <li><strong>Compaction:</strong> Minor and major compactions to merge HFiles and remove deleted data</li>
+                <li><strong>WAL (Write-Ahead Log):</strong> Sequential log for durability (one WAL shared across all regions)</li>
+                <li><strong>BlockCache:</strong> LRU cache for frequently accessed HFile blocks (shared across regions)</li>
+                <li><strong>Report to HMaster:</strong> Send load metrics, region split requests</li>
             </ul>
+
+            <h4>Region vs RegionServer - Critical Distinction</h4>
+            <div class="visual">
+Analogy: RegionServer = Building, Region = Apartment
+
+RegionServer 1 (Physical Machine: server-01.example.com)
+┌─────────────────────────────────────────────────────────┐
+│ JVM Process (Java)                                      │
+│                                                         │
+│ ┌───────────────────────────────────────────────────┐  │
+│ │ Region A (Users table, rows "aaa" to "mmm", 5 GB) │  │
+│ │ ├─ MemStore: 64 MB                                │  │
+│ │ ├─ HFiles: file1.hfile (2 GB), file2.hfile (3 GB)│  │
+│ │ └─ Bloom Filters                                  │  │
+│ └───────────────────────────────────────────────────┘  │
+│                                                         │
+│ ┌───────────────────────────────────────────────────┐  │
+│ │ Region B (Orders table, rows "000" to "500", 3 GB)│  │
+│ │ (similar structure)                               │  │
+│ └───────────────────────────────────────────────────┘  │
+│                                                         │
+│ ┌───────────────────────────────────────────────────┐  │
+│ │ META Region (hbase:meta table)                    │  │
+│ │ - Special table storing region→RS mappings        │  │
+│ │ - Treated like any other region!                  │  │
+│ └───────────────────────────────────────────────────┘  │
+│                                                         │
+│ Shared Components:                                      │
+│ ├─ BlockCache: 20 GB (shared across all regions)       │
+│ ├─ WAL: /hbase/WAL/server-01,16020,12345.log          │
+│ └─ ZooKeeper Client: Sends heartbeat every 3 seconds   │
+│                                                         │
+│ Resources: 64 GB RAM, 16 CPUs, 10 TB Disk              │
+└─────────────────────────────────────────────────────────┘
+
+Key Points:
+- Region = Data partition (logical unit of storage)
+- RegionServer = Physical process that hosts regions
+- One RegionServer hosts MANY regions (100-1000)
+- A region can only be served by ONE RegionServer at a time
+- If RegionServer crashes, its regions are reassigned to others
+- META region is just another region (no special treatment except ZK tracking)
+            </div>
 
             <h4>Internal Structure</h4>
             <div class="visual">
@@ -685,58 +768,523 @@ RegionServer Process:
             </div>
         </div>
 
-        <h3>3. ZooKeeper</h3>
+        <h3>3. ZooKeeper - The Coordinator & Health Monitor</h3>
         <div class="architecture-box">
-            <h4>Responsibilities</h4>
+            <h4>Core Responsibilities</h4>
             <ul>
-                <li><strong>Cluster Coordination:</strong> Central source of truth</li>
-                <li><strong>Master Election:</strong> Ensures only one active HMaster</li>
-                <li><strong>RegionServer Registration:</strong> All servers register with ZooKeeper</li>
-                <li><strong>Root Region Location:</strong> Where is the META table?</li>
-                <li><strong>Configuration:</strong> Cluster-wide settings</li>
-                <li><strong>Failure Detection:</strong> Heartbeat monitoring</li>
+                <li><strong>RegionServer Health Monitoring:</strong> Receives heartbeats from ALL RegionServers every ~3 seconds</li>
+                <li><strong>Failure Detection:</strong> Automatically detects dead RegionServers via session timeout (30 seconds default)</li>
+                <li><strong>Ephemeral Nodes:</strong> Each RegionServer creates ephemeral node that disappears when RS dies</li>
+                <li><strong>META Table Location:</strong> Stores which RegionServer is hosting the META table</li>
+                <li><strong>Master Election:</strong> Ensures only one active HMaster (active-standby coordination)</li>
+                <li><strong>Cluster Coordination:</strong> Central source of truth for cluster state</li>
+                <li><strong>Configuration:</strong> Cluster-wide settings and metadata</li>
+                <li><strong>Distributed Locks:</strong> Coordination for table operations (create/delete/split)</li>
             </ul>
 
-            <h4>ZooKeeper Znodes (Data Structure)</h4>
+            <h4>Critical: ZooKeeper Tracks Everything</h4>
+            <div class="visual">
+ZooKeeper is the Foundation of HBase:
+
+┌────────────────────────────────────────────────────────┐
+│ What ZooKeeper Tracks                                  │
+├────────────────────────────────────────────────────────┤
+│                                                        │
+│ ✅ ALL RegionServer Addresses (who's alive)           │
+│    - Regular RegionServers                            │
+│    - RegionServer hosting META (no special treatment) │
+│    - Via ephemeral nodes in /hbase/rs/               │
+│                                                        │
+│ ✅ ALL RegionServer Heartbeats (every 3 seconds)      │
+│    - RegionServers send session heartbeats            │
+│    - Timeout: 30 seconds (configurable)               │
+│    - Automatic failure detection                      │
+│                                                        │
+│ ✅ META Table Location (which RS hosts META)          │
+│    - Stored in /hbase/meta-region-server             │
+│    - Updated by HMaster when META moves               │
+│    - Clients query this on first lookup               │
+│                                                        │
+│ ✅ HMaster Address (active master)                    │
+│    - Leader election via ephemeral node               │
+│    - Stored in /hbase/master                          │
+│    - Standby masters watch for changes                │
+│                                                        │
+└────────────────────────────────────────────────────────┘
+            </div>
+
+            <h4>ZooKeeper Data Structure (Znodes)</h4>
             <div class="visual">
 ZooKeeper Tree:
 
 /hbase
-  ├── /master                    → Current active HMaster address
-  ├── /backup-masters            → Standby HMaster list
-  ├── /rs                        → RegionServer list
-  │    ├── /rs/server1:16020    → RegionServer 1 (ephemeral node)
-  │    ├── /rs/server2:16020    → RegionServer 2 (ephemeral node)
-  │    └── /rs/server3:16020    → RegionServer 3 (ephemeral node)
-  ├── /table                     → Table metadata
-  ├── /table-lock                → Table operation locks
-  └── /root-region-server        → Where is META region?
+  ├── /master                          → Active HMaster address
+  │   └── "hmaster-01.example.com:16000" [ephemeral]
+  │
+  ├── /backup-masters                  → Standby HMaster list
+  │   ├── "hmaster-02.example.com:16000" [ephemeral]
+  │   └── "hmaster-03.example.com:16000" [ephemeral]
+  │
+  ├── /rs                              → RegionServer tracking
+  │   ├── server-01.example.com,16020,1678901234 [ephemeral]
+  │   ├── server-02.example.com,16020,1678901235 [ephemeral]
+  │   ├── server-03.example.com,16020,1678901236 [ephemeral]
+  │   └── server-04.example.com,16020,1678901237 [ephemeral]
+  │       ↑
+  │       └─ Ephemeral nodes: Auto-deleted when RS crashes!
+  │
+  ├── /meta-region-server              → META table location
+  │   └── "server-03.example.com:16020"
+  │       ↑
+  │       └─ Updated by HMaster when META region moves
+  │
+  ├── /table                           → Table metadata
+  ├── /table-lock                      → Table operation locks
+  └── /replication                     → Replication state
 
-Ephemeral Nodes:
-- Node exists only while server is alive
-- If server crashes, node disappears
-- Automatic failure detection!
+Ephemeral Nodes Explained:
+- Created when RegionServer starts
+- Exists ONLY while session is alive
+- Requires continuous heartbeats (every 3 seconds)
+- Auto-deleted after session timeout (30 seconds)
+- HMaster watches these nodes for changes
             </div>
 
-            <h4>Example: Failure Detection</h4>
+            <h4>Heartbeat and Failure Detection Flow</h4>
             <div class="visual">
-Normal Operation:
-1. RegionServer 2 starts
-2. Creates ephemeral node: /hbase/rs/server2:16020
-3. Sends heartbeat to ZooKeeper every 30 seconds
-4. ZooKeeper keeps node alive
+NORMAL OPERATION:
 
-Failure Scenario:
-1. RegionServer 2 crashes (hardware failure)
-2. No more heartbeats
-3. After 60 seconds (2 missed heartbeats):
-   - ZooKeeper deletes /hbase/rs/server2:16020
-4. HMaster gets notification (watching /hbase/rs)
-5. HMaster takes action:
-   - Mark RegionServer 2 as dead
-   - Replay WAL to recover in-flight writes
-   - Reassign regions to other servers
-   - Within 2-3 minutes: full recovery!
+Time    RegionServer 1          ZooKeeper               HMaster
+────────────────────────────────────────────────────────────────
+T=0s    Start                   
+        Create ephemeral────────→ /hbase/rs/RS1 created
+        Send heartbeat──────────→ Session alive
+                                                    [Watching /hbase/rs/]
+
+T=3s    Send heartbeat──────────→ Session alive
+T=6s    Send heartbeat──────────→ Session alive
+T=9s    Send heartbeat──────────→ Session alive
+        ...continues...
+
+
+FAILURE SCENARIO:
+
+Time    RegionServer 1          ZooKeeper               HMaster
+────────────────────────────────────────────────────────────────
+T=0s    Send heartbeat──────────→ Session alive
+T=3s    Send heartbeat──────────→ Session alive
+T=6s    [CRASH! Power failure]
+
+T=9s                            No heartbeat received
+                                (still within timeout)
+
+T=12s                           No heartbeat received
+                                (still within timeout)
+
+T=30s                           SESSION TIMEOUT!
+                                Delete /hbase/rs/RS1
+                                                    ←─ Notification sent
+                                                       "RS1 node deleted"
+
+T=31s                                               [HMaster Action]
+                                                    1. RS1 is dead
+                                                    2. Get regions list
+                                                    3. Assign to RS2, RS3
+                                                    4. If META was on RS1:
+                                                       - Assign to RS2
+                                ←─ Update             - Update ZK
+                                /hbase/meta-region-server
+                                = "server-02:16020"
+
+T=60s                                               Recovery complete!
+                                                    All regions online
+            </div>
+
+            <h4>META Table Location Tracking</h4>
+            <div class="visual">
+Question: Where is META table stored?
+
+Physical Storage:  HDFS (like any other HBase table)
+                   - Files: /hbase/data/hbase/meta/...
+                   - Replicated 3x across HDFS DataNodes
+
+Served By:         One RegionServer (assigned by HMaster)
+                   - Could be any RegionServer
+                   - No special RegionServer for META
+                   - Treated like any other region
+
+Location Tracked:  ZooKeeper (THIS IS THE KEY!)
+                   - Path: /hbase/meta-region-server
+                   - Value: "server-03.example.com:16020"
+                   - Updated by HMaster when META moves
+
+Client Lookup:     
+Step 1: Client queries ZooKeeper
+        "Where is META?" 
+        → "server-03.example.com:16020"
+        
+Step 2: Client queries RegionServer 3 (META table)
+        "Where is Users table row 'alice'?"
+        → "server-01.example.com:16020, region abc123"
+        
+Step 3: Client queries RegionServer 1 (actual data)
+        "Get row 'alice'"
+        → {name: "Alice", age: 30, ...}
+
+Caching: Client caches both lookups:
+        - META location (from ZooKeeper)
+        - Region locations (from META)
+        - Cache invalidated on connection errors
+            </div>
+
+            <h4>Example: META Region Failure and Recovery</h4>
+            <div class="visual">
+INITIAL STATE:
+RegionServer 3 (ALIVE)
+  ├─ Hosting: META table region
+  ├─ Sending heartbeats to ZooKeeper (every 3s)
+  └─ Serving META lookups for clients
+
+ZooKeeper:
+  /hbase/rs/server-03.example.com,16020,12345 [exists]
+  /hbase/meta-region-server = "server-03.example.com:16020"
+
+──────────────────────────────────────────────────────────
+
+T=0: RegionServer 3 CRASHES
+  [Hardware failure / Power outage / JVM crash]
+  ✗ Stops sending heartbeats
+  ✗ All TCP connections closed
+
+──────────────────────────────────────────────────────────
+
+T=0-30s: ZooKeeper Waits for Heartbeat
+  "RS3 missed heartbeat at 3s... still waiting"
+  "RS3 missed heartbeat at 6s... still waiting"
+  "RS3 missed heartbeat at 30s... TIMEOUT!"
+  
+  ZooKeeper Action:
+  ✗ Delete ephemeral node: /hbase/rs/server-03...
+
+──────────────────────────────────────────────────────────
+
+T=30s: HMaster Notified by ZooKeeper
+  Event: NodeDeleted
+  Path: /hbase/rs/server-03.example.com,16020,12345
+  
+  HMaster thinks:
+  "RegionServer 3 died!"
+  "Checking what regions it was hosting..."
+  "Found: META table was on RS3"
+  "This is CRITICAL - META must be reassigned ASAP!"
+
+──────────────────────────────────────────────────────────
+
+T=30-40s: HMaster Reassigns META Region
+  
+  HMaster actions:
+  1. Choose available RegionServer (e.g., RS5)
+  2. Send RPC to RS5: "OpenRegion(hbase:meta)"
+  
+  RegionServer 5:
+  1. Load META region from HDFS
+  2. Replay WAL logs (recover uncommitted writes)
+  3. Open region for serving
+  4. Reply to HMaster: "META region open and ready"
+
+──────────────────────────────────────────────────────────
+
+T=40s: HMaster Updates ZooKeeper
+  
+  Write to ZooKeeper:
+  /hbase/meta-region-server = "server-05.example.com:16020"
+  
+  [THIS is the critical update that tells everyone
+   where META has moved!]
+
+──────────────────────────────────────────────────────────
+
+T=45s+: Clients Discover New META Location
+  
+  Client attempt:
+  1. Check cache: "META is on RS3"
+  2. Try connect to RS3 → FAILS (connection refused)
+  3. Cache invalidated
+  4. Query ZooKeeper: "Where is META?"
+  5. ZooKeeper returns: "META is on RS5"
+  6. Connect to RS5 → SUCCESS
+  7. Update cache: "META is on RS5"
+
+──────────────────────────────────────────────────────────
+
+FINAL STATE:
+RegionServer 5 (ALIVE)
+  ├─ Now hosting: META table region ✓
+  ├─ Sending heartbeats to ZooKeeper ✓
+  └─ Serving META lookups for clients ✓
+
+ZooKeeper:
+  /hbase/rs/server-05.example.com,16020,67890 [exists] ✓
+  /hbase/meta-region-server = "server-05.example.com:16020" ✓
+
+Recovery Time: ~30-60 seconds total
+            </div>
+
+            <h4>Is META Region Special?</h4>
+            <div class="visual">
+Comparison: Regular Region vs META Region
+
+┌──────────────────────────────────────────────────────────┐
+│ Aspect              │ Regular Region  │ META Region      │
+├─────────────────────┼─────────────────┼──────────────────┤
+│ Stored on           │ HDFS            │ HDFS             │
+│ Replicated          │ 3x via HDFS     │ 3x via HDFS      │
+│ Hosted by           │ RegionServer    │ RegionServer     │
+│ Assigned by         │ HMaster         │ HMaster          │
+│ Heartbeat tracked   │ Via ZooKeeper   │ Via ZooKeeper    │
+│ Failure detection   │ Via ZooKeeper   │ Via ZooKeeper    │
+│ Recovery process    │ HMaster         │ HMaster          │
+│                     │                 │                  │
+│ ONLY DIFFERENCE:    │                 │                  │
+│ Location stored in  │ META table      │ ZooKeeper        │
+│                     │                 │ (/hbase/meta-    │
+│                     │                 │  region-server)  │
+│                     │                 │                  │
+│ Why different?      │ -               │ Bootstrap problem│
+│                     │                 │ (can't use META  │
+│                     │                 │ to find META!)   │
+└──────────────────────────────────────────────────────────┘
+
+Key Insight: META region is treated IDENTICALLY to regular
+regions, except its location is stored in ZooKeeper so 
+clients can find it (bootstrap problem solved).
+            </div>
+        </div>
+
+        <!-- COMPONENT INTERACTION SUMMARY -->
+        <h3>Component Interaction Summary</h3>
+        <div class="solution-box">
+            <h4>Who Does What? - The Complete Picture</h4>
+            
+            <div class="visual">
+┌──────────────────────────────────────────────────────────────┐
+│                     ROLE BREAKDOWN                           │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│ ZooKeeper = Health Monitor + Address Book                   │
+│ ├─ Receives: Heartbeats from ALL RegionServers             │
+│ ├─ Detects: RegionServer failures (30s timeout)            │
+│ ├─ Stores: Who's alive, where is META, who is HMaster      │
+│ ├─ Notifies: HMaster when RegionServers die                │
+│ └─ Role: Foundation layer - monitoring and coordination     │
+│                                                              │
+│ HMaster = Manager + Decision Maker                          │
+│ ├─ Watches: ZooKeeper for RegionServer failures            │
+│ ├─ Decides: Which RegionServer should host which region     │
+│ ├─ Assigns: Regions to RegionServers (including META)       │
+│ ├─ Updates: ZooKeeper (META location), META table (regions)│
+│ ├─ Manages: Load balancing, region splits, schema          │
+│ └─ Role: Control plane - NOT on data path!                 │
+│                                                              │
+│ RegionServers = Workers + Data Servers                      │
+│ ├─ Report to: ZooKeeper (heartbeats every 3s)             │
+│ ├─ Take orders from: HMaster (region assignments)          │
+│ ├─ Serve: ALL client reads/writes (data path!)            │
+│ ├─ Host: Multiple regions (100-1000 per server)            │
+│ ├─ Store: Data in HDFS (HFiles), RAM (MemStore/cache)     │
+│ └─ Role: Data plane - critical path for all operations     │
+│                                                              │
+│ META Table = Directory Service                              │
+│ ├─ Type: Special HBase table (hbase:meta)                  │
+│ ├─ Contains: Mapping of region → RegionServer              │
+│ ├─ Stored on: HDFS (replicated 3x)                         │
+│ ├─ Served by: One RegionServer (like any region)           │
+│ ├─ Location tracked in: ZooKeeper (bootstrap!)             │
+│ └─ Role: Tells clients which RS has their data             │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+            </div>
+
+            <h4>The Data Flow: Client Read/Write</h4>
+            <div class="visual">
+Normal Operation (After Bootstrap):
+
+Client wants: get("Users", "alice")
+
+Step 1: Location Lookup (first time only)
+  Client → ZooKeeper: "Where is META table?"
+  ZooKeeper → Client: "RegionServer 3"
+  [Client caches: META is on RS3]
+
+Step 2: Region Lookup (first time for this key)
+  Client → RS3 (META): "Where is Users:alice?"
+  RS3 → Client: "RegionServer 1, region abc123"
+  [Client caches: Users:alice is on RS1]
+
+Step 3: Data Retrieval (direct!)
+  Client → RS1: "Get alice"
+  RS1 → Client: {name: "Alice", age: 30, ...}
+
+Subsequent reads of nearby keys (e.g., "bob", "charlie"):
+  Client → RS1 directly (cached!)
+  [Only 1 network hop!]
+
+HMaster's role in this flow: NONE!
+  - HMaster not involved in reads/writes
+  - Only used for admin operations
+            </div>
+
+            <h4>The Failure Flow: RegionServer Crash</h4>
+            <div class="visual">
+Complete Failure Recovery Timeline:
+
+T=0s:    RegionServer 1 crashes (hosting 200 regions)
+         ├─ Stops sending heartbeats to ZooKeeper
+         └─ All TCP connections drop
+
+T=3-30s: ZooKeeper waits for heartbeat
+         ├─ Session still valid (within timeout)
+         └─ No action taken yet
+
+T=30s:   ZooKeeper detects failure
+         ├─ Session timeout reached
+         ├─ Delete /hbase/rs/regionserver-01...
+         └─ Send notification to HMaster
+
+T=31s:   HMaster springs into action
+         ├─ "RS1 is dead!"
+         ├─ Query internal state: "RS1 had 200 regions"
+         ├─ Split recovery work across other RegionServers
+         └─ Start region assignment process
+
+T=32-90s: Region Recovery
+         For each region on dead RS1:
+         ├─ HMaster picks target RegionServer (load balancing)
+         ├─ Send RPC: "OpenRegion(regionX)"
+         ├─ Target RS loads region from HDFS
+         ├─ Target RS replays WAL (recover uncommitted writes)
+         ├─ Target RS opens region for serving
+         └─ Target RS reports back: "Region open"
+
+T=90s:   HMaster updates metadata
+         ├─ Update META table with new mappings
+         ├─ If META was on RS1: Update ZooKeeper
+         └─ Mark RS1 as dead in internal state
+
+T=91s+:  Clients discover new locations
+         ├─ Cache misses on next request
+         ├─ Query META for new location
+         ├─ Update cache
+         └─ Resume normal operations
+
+Recovery Time: 60-120 seconds typically
+  - Depends on: Number of regions, WAL size, cluster load
+  - During recovery: Affected regions temporarily unavailable
+  - Other regions: Continue serving normally!
+            </div>
+
+            <h4>Key Questions Answered</h4>
+            <table>
+                <tr>
+                    <th>Question</th>
+                    <th>Answer</th>
+                    <th>Component</th>
+                </tr>
+                <tr>
+                    <td><strong>Who tracks RegionServers?</strong></td>
+                    <td>ZooKeeper (via ephemeral nodes)</td>
+                    <td>ZooKeeper</td>
+                </tr>
+                <tr>
+                    <td><strong>Who receives heartbeats?</strong></td>
+                    <td>ZooKeeper (every 3 seconds from each RS)</td>
+                    <td>ZooKeeper</td>
+                </tr>
+                <tr>
+                    <td><strong>Who detects failures?</strong></td>
+                    <td>ZooKeeper (session timeout) → notifies HMaster</td>
+                    <td>ZooKeeper + HMaster</td>
+                </tr>
+                <tr>
+                    <td><strong>Who assigns regions after failure?</strong></td>
+                    <td>HMaster (makes assignment decisions)</td>
+                    <td>HMaster</td>
+                </tr>
+                <tr>
+                    <td><strong>Who updates META location?</strong></td>
+                    <td>HMaster (writes to ZooKeeper)</td>
+                    <td>HMaster → ZooKeeper</td>
+                </tr>
+                <tr>
+                    <td><strong>Who serves data?</strong></td>
+                    <td>RegionServers (ALL reads/writes)</td>
+                    <td>RegionServers</td>
+                </tr>
+                <tr>
+                    <td><strong>Is META table special?</strong></td>
+                    <td>No! Except location is in ZooKeeper</td>
+                    <td>META table</td>
+                </tr>
+                <tr>
+                    <td><strong>Is META RegionServer special?</strong></td>
+                    <td>No! It's just a regular RegionServer</td>
+                    <td>RegionServer</td>
+                </tr>
+                <tr>
+                    <td><strong>Where is META stored physically?</strong></td>
+                    <td>HDFS (replicated 3x like all data)</td>
+                    <td>HDFS</td>
+                </tr>
+                <tr>
+                    <td><strong>Where is META location tracked?</strong></td>
+                    <td>ZooKeeper (/hbase/meta-region-server)</td>
+                    <td>ZooKeeper</td>
+                </tr>
+                <tr>
+                    <td><strong>Who updates region→RS mappings?</strong></td>
+                    <td>HMaster (writes to META table)</td>
+                    <td>HMaster → META</td>
+                </tr>
+                <tr>
+                    <td><strong>Can cluster run without HMaster?</strong></td>
+                    <td>Yes! Reads/writes continue (no admin ops)</td>
+                    <td>N/A</td>
+                </tr>
+            </table>
+
+            <h4>The Mental Model</h4>
+            <div class="visual">
+Think of HBase as a Company:
+
+ZooKeeper = HR Department
+  - Tracks employee attendance (heartbeats)
+  - Knows who's present/absent (alive/dead)
+  - Notifies management of absences (failures)
+  - Maintains employee directory (addresses)
+
+HMaster = Manager
+  - Gets absence reports from HR (ZooKeeper)
+  - Decides who takes over absent employee's work
+  - Assigns tasks to employees (regions to RS)
+  - Not involved in day-to-day work execution
+
+RegionServers = Employees
+  - Clock in/out with HR (ZooKeeper heartbeats)
+  - Receive assignments from Manager (HMaster)
+  - Do all actual work (serve reads/writes)
+  - Report to HR, take orders from Manager
+
+META Table = Company Directory
+  - Lists which employee handles which clients
+  - Stored in company database (HDFS)
+  - One employee maintains it (a RegionServer)
+  - Directory's location posted on bulletin board (ZooKeeper)
+
+Clients = Customers
+  - Check bulletin board (ZK) to find directory (META)
+  - Check directory to find right employee (RegionServer)
+  - Work directly with employee (no manager involved!)
+  - Cache employee contacts for repeat business
             </div>
         </div>
 
