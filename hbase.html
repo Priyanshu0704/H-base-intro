@@ -1,0 +1,1382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HBase Deep Dive - Why LSM Tree Alone Isn't Enough</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: linear-gradient(135deg, #FF6B35 0%, #F7931E 50%, #FDC830 100%);
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+            padding: 40px;
+        }
+
+        h1 {
+            color: #FF6B35;
+            text-align: center;
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            border-bottom: 4px solid #FF6B35;
+            padding-bottom: 15px;
+        }
+
+        h2 {
+            color: #F7931E;
+            font-size: 1.8em;
+            margin-top: 40px;
+            margin-bottom: 20px;
+            border-left: 5px solid #F7931E;
+            padding-left: 15px;
+        }
+
+        h3 {
+            color: #555;
+            font-size: 1.4em;
+            margin-top: 30px;
+            margin-bottom: 15px;
+            border-bottom: 2px solid #ddd;
+            padding-bottom: 8px;
+        }
+
+        h4 {
+            color: #666;
+            font-size: 1.2em;
+            margin-top: 20px;
+            margin-bottom: 10px;
+            font-weight: 600;
+        }
+
+        p {
+            margin-bottom: 15px;
+            text-align: justify;
+        }
+
+        ul, ol {
+            margin-left: 30px;
+            margin-bottom: 20px;
+        }
+
+        li {
+            margin-bottom: 8px;
+        }
+
+        .intro {
+            font-size: 1.1em;
+            color: #555;
+            font-style: italic;
+            margin-bottom: 25px;
+            padding: 15px;
+            background: #FFF8E1;
+            border-radius: 8px;
+            border-left: 4px solid #FDC830;
+        }
+
+        .problem-box {
+            background: #FFEBEE;
+            border-left: 4px solid #F44336;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 5px;
+        }
+
+        .solution-box {
+            background: #E8F5E9;
+            border-left: 4px solid #4CAF50;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 5px;
+        }
+
+        .architecture-box {
+            background: #E3F2FD;
+            border-left: 4px solid #2196F3;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 5px;
+        }
+
+        .warning-box {
+            background: #FFF3E0;
+            border-left: 4px solid #FF9800;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 5px;
+        }
+
+        .comparison-box {
+            background: #F3E5F5;
+            border-left: 4px solid #9C27B0;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 5px;
+        }
+
+        .visual {
+            background: white;
+            border: 2px solid #ddd;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+            font-family: monospace;
+            white-space: pre;
+            overflow-x: auto;
+            font-size: 0.9em;
+        }
+
+        .highlight {
+            background: #FFF9C4;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-weight: 600;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        th {
+            background: #FF6B35;
+            color: white;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+        }
+
+        td {
+            padding: 12px;
+            border-bottom: 1px solid #ddd;
+        }
+
+        tr:nth-child(even) {
+            background: #f8f9fa;
+        }
+
+        tr:hover {
+            background: #e9ecef;
+        }
+
+        strong {
+            color: #F7931E;
+        }
+
+        .toc {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 30px 0;
+        }
+
+        .toc a {
+            color: #FF6B35;
+            text-decoration: none;
+            font-weight: 500;
+        }
+
+        .toc a:hover {
+            text-decoration: underline;
+        }
+
+        .key-point {
+            background: #E1F5FE;
+            border-left: 4px solid #03A9F4;
+            padding: 12px;
+            margin: 12px 0;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>HBase Deep Dive</h1>
+        <p style="text-align: center; font-size: 1.2em; color: #666; margin-bottom: 30px;">
+            Why LSM Tree Alone Isn't Enough - Understanding the Need for Distributed Systems
+        </p>
+
+        <div class="intro">
+            <strong>The Question:</strong> If LSM Tree is so good, why can't I just implement it and use it as my database? Why do I need HBase?
+            <br><br>
+            <strong>The Answer:</strong> An LSM tree is a <em>data structure</em>, not a complete database system. It's like asking "I understand arrays, why do I need an operating system?" HBase solves the massive complexity of building a production-ready, distributed, fault-tolerant database system on top of LSM trees.
+        </div>
+
+        <div class="toc">
+            <h3>Table of Contents</h3>
+            <ol>
+                <li><a href="#gap">The Gap: LSM Tree vs Production Database</a></li>
+                <li><a href="#single-node">Single-Node Limitations</a></li>
+                <li><a href="#distributed">Why We Need Distributed Systems</a></li>
+                <li><a href="#hbase-architecture">HBase Architecture</a></li>
+                <li><a href="#hbase-components">HBase Components Deep Dive</a></li>
+                <li><a href="#hbase-operations">HBase Operations</a></li>
+                <li><a href="#hbase-features">HBase Advanced Features</a></li>
+                <li><a href="#comparison">HBase vs Simple LSM Implementation</a></li>
+            </ol>
+        </div>
+
+        <!-- THE GAP -->
+        <h2 id="gap">The Gap: LSM Tree vs Production Database</h2>
+
+        <div class="problem-box">
+            <h3>What LSM Tree Gives You (Data Structure Level)</h3>
+            <ul>
+                <li>✓ Fast writes (sequential I/O)</li>
+                <li>✓ MemTable (in-memory buffer)</li>
+                <li>✓ SSTables (immutable on-disk files)</li>
+                <li>✓ Compaction (merge files)</li>
+                <li>✓ Bloom filters (skip unnecessary reads)</li>
+            </ul>
+            <p><strong>Scope:</strong> Single machine, single process, basic CRUD operations</p>
+        </div>
+
+        <div class="problem-box">
+            <h3>What LSM Tree DOESN'T Give You</h3>
+            <ul>
+                <li>✗ <strong>Distributed Storage:</strong> What if data doesn't fit on one machine?</li>
+                <li>✗ <strong>High Availability:</strong> What if machine crashes?</li>
+                <li>✗ <strong>Fault Tolerance:</strong> How to survive disk failures?</li>
+                <li>✗ <strong>Horizontal Scalability:</strong> How to add more machines?</li>
+                <li>✗ <strong>Data Replication:</strong> How to replicate data across servers?</li>
+                <li>✗ <strong>Load Balancing:</strong> How to distribute requests?</li>
+                <li>✗ <strong>Consistency Guarantees:</strong> How to handle concurrent writes?</li>
+                <li>✗ <strong>Network Protocol:</strong> How do clients talk to server?</li>
+                <li>✗ <strong>Authentication/Authorization:</strong> Security and access control</li>
+                <li>✗ <strong>Monitoring/Metrics:</strong> Observability and debugging</li>
+                <li>✗ <strong>Backup/Restore:</strong> Disaster recovery</li>
+                <li>✗ <strong>Schema Management:</strong> Tables, columns, versioning</li>
+                <li>✗ <strong>Query Language:</strong> How do users interact with it?</li>
+                <li>✗ <strong>Transactions:</strong> Multi-row atomic operations</li>
+                <li>✗ <strong>Secondary Indexes:</strong> Query by non-primary key</li>
+            </ul>
+            <p><strong>These are MASSIVE problems</strong> that take years to solve properly!</p>
+        </div>
+
+        <!-- SINGLE NODE LIMITATIONS -->
+        <h2 id="single-node">Single-Node Limitations</h2>
+
+        <p class="intro">Let's say you implement a perfect LSM tree on a single machine. Here are the problems you'll immediately face:</p>
+
+        <h3>1. Storage Capacity Limit</h3>
+        <div class="problem-box">
+            <h4>The Problem</h4>
+            <p><strong>Scenario:</strong> You're building a logging system for a large application.</p>
+            <ul>
+                <li>Your application generates 10 GB of logs per day</li>
+                <li>You need to retain logs for 1 year = 10 GB × 365 = 3.65 TB</li>
+                <li>But your server only has 1 TB disk!</li>
+            </ul>
+            <p><strong>Your LSM tree implementation says:</strong> "Error: Disk full. Cannot write."</p>
+            <p><strong>What do you do?</strong></p>
+            <ul>
+                <li>❌ Buy bigger disk? (Doesn't scale indefinitely, expensive)</li>
+                <li>❌ Delete old data? (Violates retention requirements)</li>
+                <li>✓ <strong>Solution: Distribute data across multiple machines</strong></li>
+            </ul>
+        </div>
+
+        <h3>2. Single Point of Failure</h3>
+        <div class="problem-box">
+            <h4>The Problem</h4>
+            <p><strong>Scenario:</strong> Your server crashes at 3 AM.</p>
+            <ul>
+                <li>Hard drive fails</li>
+                <li>Or motherboard dies</li>
+                <li>Or power supply explodes</li>
+                <li>Or datacenter loses power</li>
+            </ul>
+            <p><strong>Result:</strong></p>
+            <ul>
+                <li>🔴 Your entire database is DOWN</li>
+                <li>🔴 All writes are REJECTED</li>
+                <li>🔴 All reads are REJECTED</li>
+                <li>🔴 Your application is BROKEN</li>
+                <li>🔴 Users are ANGRY</li>
+                <li>🔴 Money is LOST</li>
+            </ul>
+            <p><strong>Your LSM tree implementation says:</strong> "Sorry, I'm dead. Good luck!"</p>
+            <p><strong>What do you do?</strong></p>
+            <ul>
+                <li>✓ <strong>Solution: Replicate data to multiple machines</strong></li>
+                <li>✓ If one machine dies, others serve requests</li>
+            </ul>
+        </div>
+
+        <h3>3. Throughput Bottleneck</h3>
+        <div class="problem-box">
+            <h4>The Problem</h4>
+            <p><strong>Scenario:</strong> Your application becomes popular!</p>
+            <ul>
+                <li>You go from 100 requests/sec to 100,000 requests/sec</li>
+                <li>Single machine CPU: 100% usage</li>
+                <li>Single machine network: Saturated at 10 Gbps</li>
+                <li>Single machine disk I/O: Maxed out at 500 MB/s</li>
+            </ul>
+            <p><strong>Result:</strong></p>
+            <ul>
+                <li>⏱️ Latency increases from 1ms to 5 seconds</li>
+                <li>⏱️ Timeouts everywhere</li>
+                <li>⏱️ Users abandoning your app</li>
+            </ul>
+            <p><strong>Your LSM tree implementation says:</strong> "I'm doing my best! I can't handle more!"</p>
+            <p><strong>What do you do?</strong></p>
+            <ul>
+                <li>❌ Buy faster CPU? (Limited by physics, expensive)</li>
+                <li>❌ Add more RAM? (Helps but doesn't solve network/disk bottleneck)</li>
+                <li>✓ <strong>Solution: Distribute load across multiple machines</strong></li>
+            </ul>
+        </div>
+
+        <h3>4. Geographic Distribution</h3>
+        <div class="problem-box">
+            <h4>The Problem</h4>
+            <p><strong>Scenario:</strong> You have users worldwide.</p>
+            <ul>
+                <li>Your server is in New York</li>
+                <li>User in Tokyo makes a request</li>
+                <li>Round-trip latency: ~150ms (speed of light limit!)</li>
+                <li>User in Sydney: ~200ms</li>
+            </ul>
+            <p><strong>Result:</strong> Terrible user experience for non-US users</p>
+            <p><strong>Your LSM tree implementation says:</strong> "I can't break physics!"</p>
+            <p><strong>What do you do?</strong></p>
+            <ul>
+                <li>✓ <strong>Solution: Deploy database servers in multiple regions</strong></li>
+                <li>✓ Route users to nearest datacenter</li>
+                <li>✓ Replicate data across regions</li>
+            </ul>
+        </div>
+
+        <h3>5. Operational Complexity</h3>
+        <div class="problem-box">
+            <h4>The Problem</h4>
+            <p><strong>Scenario:</strong> Production issues at scale.</p>
+            <ul>
+                <li><strong>Monitoring:</strong> How do you know compaction is falling behind?</li>
+                <li><strong>Debugging:</strong> Why is read latency suddenly high?</li>
+                <li><strong>Tuning:</strong> What compaction parameters should you use?</li>
+                <li><strong>Backup:</strong> How to backup 1 TB database without downtime?</li>
+                <li><strong>Schema Evolution:</strong> How to add a column to 1 billion rows?</li>
+                <li><strong>Performance Regression:</strong> Why did throughput drop after code deploy?</li>
+            </ul>
+            <p><strong>Your LSM tree implementation says:</strong> "Figure it out yourself!"</p>
+            <p><strong>What do you do?</strong></p>
+            <ul>
+                <li>😫 Spend months building monitoring dashboards</li>
+                <li>😫 Spend months building profiling tools</li>
+                <li>😫 Spend months debugging production issues</li>
+                <li>✓ <strong>Or use HBase which has all this built-in!</strong></li>
+            </ul>
+        </div>
+
+        <!-- WHY DISTRIBUTED -->
+        <h2 id="distributed">Why We Need Distributed Systems</h2>
+
+        <p class="intro">A distributed database like HBase solves all the problems above by spreading data and load across many machines.</p>
+
+        <h3>Core Distributed System Challenges</h3>
+
+        <h4>1. Data Partitioning (Sharding)</h4>
+        <div class="architecture-box">
+            <p><strong>Problem:</strong> How to split 10 TB data across 10 machines?</p>
+            <p><strong>Simple Approach (Won't Work):</strong></p>
+            <ul>
+                <li>Put rows 1-1000 on Server 1</li>
+                <li>Put rows 1001-2000 on Server 2</li>
+                <li>Problem: What if you INSERT row 500? Which server?</li>
+                <li>Problem: What if Server 1 gets 90% of requests? (Hot spotting)</li>
+            </ul>
+            <p><strong>Better Approach (Range Partitioning):</strong></p>
+            <ul>
+                <li>Split by key ranges: A-M on Server 1, N-Z on Server 2</li>
+                <li>Problem: Uneven distribution (more names start with S)</li>
+            </ul>
+            <p><strong>HBase Approach (Regions):</strong></p>
+            <ul>
+                <li>Split table into <strong>regions</strong> (contiguous key ranges)</li>
+                <li>Each region: 10-100 GB of data</li>
+                <li>Assign regions to <strong>RegionServers</strong> (physical machines)</li>
+                <li>Automatic splitting when region grows too large</li>
+                <li>Automatic load balancing by moving regions</li>
+            </ul>
+        </div>
+
+        <div class="visual">
+Table with 1 billion rows:
+
+Single Machine:
+┌─────────────────────────────────────────────┐
+│ Server 1                                    │
+│ All 1 billion rows (10 TB)                 │
+│ - Disk full                                 │
+│ - CPU overloaded                            │
+│ - Single point of failure                   │
+└─────────────────────────────────────────────┘
+
+HBase (Distributed across 10 machines):
+┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+│ RegionServer 1  │  │ RegionServer 2  │  │ RegionServer 3  │
+│ Region 1:       │  │ Region 4:       │  │ Region 7:       │
+│  Keys A-C       │  │  Keys J-L       │  │  Keys S-U       │
+│  100M rows (1TB)│  │  100M rows (1TB)│  │  100M rows (1TB)│
+│                 │  │                 │  │                 │
+│ Region 2:       │  │ Region 5:       │  │ Region 8:       │
+│  Keys D-F       │  │  Keys M-O       │  │  Keys V-X       │
+│  100M rows (1TB)│  │  100M rows (1TB)│  │  100M rows (1TB)│
+└─────────────────┘  └─────────────────┘  └─────────────────┘
+
+┌─────────────────┐  ┌─────────────────┐
+│ RegionServer 4  │  │ RegionServer 5  │
+│ Region 3:       │  │ Region 6:       │
+│  Keys G-I       │  │  Keys P-R       │
+│  100M rows (1TB)│  │  100M rows (1TB)│
+│                 │  │                 │
+│ Region 9:       │  │ Region 10:      │
+│  Keys Y-Z       │  │  Keys misc      │
+│  100M rows (1TB)│  │  100M rows (1TB)│
+└─────────────────┘  └─────────────────┘
+
+Result:
+- Total: 10 TB distributed across 5 servers
+- Each server: 2 TB (manageable)
+- Combined throughput: 5x single machine
+- If one server dies: 80% of data still available
+        </div>
+
+        <h4>2. Replication</h4>
+        <div class="architecture-box">
+            <p><strong>Problem:</strong> How to survive machine failures?</p>
+            <p><strong>Solution:</strong> Keep multiple copies of each data piece</p>
+            <p><strong>HBase Approach:</strong></p>
+            <ul>
+                <li>HBase delegates replication to <strong>HDFS</strong> (Hadoop Distributed File System)</li>
+                <li>Each HFile (SSTable) is replicated 3x by default</li>
+                <li>HDFS automatically maintains replicas</li>
+                <li>If one copy dies, HDFS creates new replica</li>
+            </ul>
+        </div>
+
+        <div class="visual">
+Replication Example:
+
+Original Data:
+Region 1 (keys A-C) on RegionServer 1
+
+HDFS Replication (3 copies):
+┌─────────────────────────────────────────────────────┐
+│ HFile: region1-0001.hfile (1 GB)                    │
+├─────────────────────────────────────────────────────┤
+│ Copy 1: DataNode 1 (Primary)                       │
+│ Copy 2: DataNode 2 (Backup)                        │
+│ Copy 3: DataNode 3 (Backup)                        │
+└─────────────────────────────────────────────────────┘
+
+Failure Scenario:
+DataNode 1 CRASHES! 💥
+
+HDFS Response:
+1. Detects DataNode 1 is dead (heartbeat timeout)
+2. Marks Copy 1 as lost
+3. Automatically creates new copy on DataNode 4
+4. Within minutes: 3 copies restored
+
+HBase Response:
+1. RegionServer 1 loses access to local copy
+2. Reads from DataNode 2 or 3 instead
+3. Slight latency increase but NO DATA LOSS
+4. Zero downtime!
+        </div>
+
+        <h4>3. Consistency and Coordination</h4>
+        <div class="architecture-box">
+            <p><strong>Problem:</strong> Multiple servers, who's in charge?</p>
+            <p><strong>Challenges:</strong></p>
+            <ul>
+                <li>Which server hosts which region?</li>
+                <li>What if two servers think they own the same region?</li>
+                <li>What if a server dies mid-write?</li>
+                <li>How to prevent split-brain scenarios?</li>
+            </ul>
+            <p><strong>HBase Solution: Apache ZooKeeper</strong></p>
+            <ul>
+                <li><strong>Distributed coordination service</strong></li>
+                <li>Stores cluster metadata</li>
+                <li>Elects master server</li>
+                <li>Tracks which regions are assigned to which servers</li>
+                <li>Provides distributed locks</li>
+                <li>Detects server failures via heartbeats</li>
+            </ul>
+        </div>
+
+        <!-- HBASE ARCHITECTURE -->
+        <h2 id="hbase-architecture">HBase Architecture</h2>
+
+        <p class="intro">HBase is a distributed, column-oriented database built on top of HDFS, using LSM tree storage engine, coordinated by ZooKeeper.</p>
+
+        <div class="visual">
+HBase Architecture (Full Stack):
+
+┌─────────────────────────────────────────────────────────────────┐
+│                         CLIENT LAYER                            │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
+│  │ Java Client  │  │  REST API    │  │  Thrift API  │         │
+│  └──────────────┘  └──────────────┘  └──────────────┘         │
+└─────────────────────────────────────────────────────────────────┘
+                            ↓ ↓ ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                      HBASE MASTER                               │
+│  ┌────────────────────────────────────────────────────────┐    │
+│  │ - Region assignment                                    │    │
+│  │ - Load balancing (move regions between servers)       │    │
+│  │ - Schema changes (create/delete tables)               │    │
+│  │ - RegionServer monitoring                             │    │
+│  │ - Failure detection and recovery                      │    │
+│  └────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────┘
+                            ↕ ↕ ↕
+┌─────────────────────────────────────────────────────────────────┐
+│                       ZOOKEEPER CLUSTER                         │
+│  ┌────────────────────────────────────────────────────────┐    │
+│  │ - Cluster metadata (region → server mapping)          │    │
+│  │ - Master election (active/standby)                    │    │
+│  │ - Distributed locks                                   │    │
+│  │ - Configuration management                            │    │
+│  └────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────┘
+                            ↕ ↕ ↕
+┌────────────────┐  ┌────────────────┐  ┌────────────────┐
+│ RegionServer 1 │  │ RegionServer 2 │  │ RegionServer 3 │
+│ ┌────────────┐ │  │ ┌────────────┐ │  │ ┌────────────┐ │
+│ │ Region A   │ │  │ │ Region D   │ │  │ │ Region G   │ │
+│ │ MemStore   │ │  │ │ MemStore   │ │  │ │ MemStore   │ │
+│ │ BlockCache │ │  │ │ BlockCache │ │  │ │ BlockCache │ │
+│ │ WAL        │ │  │ │ WAL        │ │  │ │ WAL        │ │
+│ └────────────┘ │  │ └────────────┘ │  │ └────────────┘ │
+│ ┌────────────┐ │  │ ┌────────────┐ │  │ ┌────────────┐ │
+│ │ Region B   │ │  │ │ Region E   │ │  │ │ Region H   │ │
+│ └────────────┘ │  │ └────────────┘ │  │ └────────────┘ │
+│ ┌────────────┐ │  │ ┌────────────┐ │  │ ┌────────────┐ │
+│ │ Region C   │ │  │ │ Region F   │ │  │ │ Region I   │ │
+│ └────────────┘ │  │ └────────────┘ │  │ └────────────┘ │
+└────────────────┘  └────────────────┘  └────────────────┘
+        ↓                   ↓                   ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                    HDFS (Storage Layer)                         │
+│  ┌────────────┐  ┌────────────┐  ┌────────────┐              │
+│  │ DataNode 1 │  │ DataNode 2 │  │ DataNode 3 │              │
+│  │ HFiles     │  │ HFiles     │  │ HFiles     │              │
+│  │ WAL logs   │  │ WAL logs   │  │ WAL logs   │              │
+│  └────────────┘  └────────────┘  └────────────┘              │
+│                                                                 │
+│  Each HFile replicated 3x across DataNodes                     │
+└─────────────────────────────────────────────────────────────────┘
+        </div>
+
+        <!-- HBASE COMPONENTS -->
+        <h2 id="hbase-components">HBase Components Deep Dive</h2>
+
+        <h3>1. HMaster (Master Server)</h3>
+        <div class="architecture-box">
+            <h4>Responsibilities</h4>
+            <ul>
+                <li><strong>Region Assignment:</strong> Decides which RegionServer hosts which region</li>
+                <li><strong>Load Balancing:</strong> Moves regions to balance load
+                    <ul>
+                        <li>If RegionServer A has 100 regions and B has 10, move some from A to B</li>
+                        <li>If RegionServer C gets 90% of requests, split hot region</li>
+                    </ul>
+                </li>
+                <li><strong>Schema Operations:</strong> Create/delete tables, add/remove column families</li>
+                <li><strong>Region Splitting:</strong> When region grows > 10 GB, split into two</li>
+                <li><strong>Failure Recovery:</strong> Detects dead RegionServers, reassigns their regions</li>
+                <li><strong>Monitoring:</strong> Health checks, metrics collection</li>
+            </ul>
+
+            <h4>High Availability</h4>
+            <ul>
+                <li><strong>Active-Standby Setup:</strong> Multiple HMaster instances</li>
+                <li>ZooKeeper elects one as active</li>
+                <li>If active dies, standby takes over (automatic failover)</li>
+                <li><strong>Important:</strong> HMaster is NOT on critical path for reads/writes
+                    <ul>
+                        <li>Clients talk directly to RegionServers</li>
+                        <li>If HMaster is down, reads/writes continue!</li>
+                        <li>Only admin operations (create table) are blocked</li>
+                    </ul>
+                </li>
+            </ul>
+        </div>
+
+        <h3>2. RegionServer (Worker Server)</h3>
+        <div class="architecture-box">
+            <h4>Responsibilities</h4>
+            <ul>
+                <li><strong>Serve Reads/Writes:</strong> Handle all client requests for assigned regions</li>
+                <li><strong>Region Management:</strong> Host multiple regions (10-100 per server)</li>
+                <li><strong>MemStore Management:</strong> In-memory write buffer (one per column family per region)</li>
+                <li><strong>Flush Operations:</strong> When MemStore full, flush to HFile</li>
+                <li><strong>Compaction:</strong> Minor and major compactions to merge HFiles</li>
+                <li><strong>WAL:</strong> Write-ahead log for durability</li>
+                <li><strong>BlockCache:</strong> LRU cache for frequently accessed blocks</li>
+            </ul>
+
+            <h4>Internal Structure</h4>
+            <div class="visual">
+RegionServer Process:
+
+┌─────────────────────────────────────────────────────┐
+│ RegionServer JVM                                    │
+│                                                     │
+│ ┌─────────────────────────────────────────────┐   │
+│ │ Region: users table, rows A-M               │   │
+│ │                                             │   │
+│ │ ┌─────────────────────────────────────────┐ │   │
+│ │ │ MemStore (RAM)                          │ │   │
+│ │ │ - Active writes go here                 │ │   │
+│ │ │ - Sorted by key                         │ │   │
+│ │ │ - Size: 0-128 MB                        │ │   │
+│ │ └─────────────────────────────────────────┘ │   │
+│ │                                             │   │
+│ │ ┌─────────────────────────────────────────┐ │   │
+│ │ │ HFiles (Disk via HDFS)                  │ │   │
+│ │ │ - Immutable SSTables                    │ │   │
+│ │ │ - File 1: 100 MB                        │ │   │
+│ │ │ - File 2: 150 MB                        │ │   │
+│ │ │ - File 3: 200 MB                        │ │   │
+│ │ └─────────────────────────────────────────┘ │   │
+│ └─────────────────────────────────────────────┘   │
+│                                                     │
+│ ┌─────────────────────────────────────────────┐   │
+│ │ Region: users table, rows N-Z               │   │
+│ │ (similar structure)                         │   │
+│ └─────────────────────────────────────────────┘   │
+│                                                     │
+│ ┌─────────────────────────────────────────────┐   │
+│ │ BlockCache (RAM)                            │   │
+│ │ - LRU cache of data blocks                  │   │
+│ │ - Size: Configurable (e.g., 40% of heap)    │   │
+│ │ - Shared across all regions                 │   │
+│ └─────────────────────────────────────────────┘   │
+│                                                     │
+│ ┌─────────────────────────────────────────────┐   │
+│ │ WAL (Write-Ahead Log on HDFS)               │   │
+│ │ - Sequential log of all mutations           │   │
+│ │ - Shared across all regions                 │   │
+│ │ - Rolled periodically (e.g., 1 hour)        │   │
+│ └─────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────┘
+            </div>
+        </div>
+
+        <h3>3. ZooKeeper</h3>
+        <div class="architecture-box">
+            <h4>Responsibilities</h4>
+            <ul>
+                <li><strong>Cluster Coordination:</strong> Central source of truth</li>
+                <li><strong>Master Election:</strong> Ensures only one active HMaster</li>
+                <li><strong>RegionServer Registration:</strong> All servers register with ZooKeeper</li>
+                <li><strong>Root Region Location:</strong> Where is the META table?</li>
+                <li><strong>Configuration:</strong> Cluster-wide settings</li>
+                <li><strong>Failure Detection:</strong> Heartbeat monitoring</li>
+            </ul>
+
+            <h4>ZooKeeper Znodes (Data Structure)</h4>
+            <div class="visual">
+ZooKeeper Tree:
+
+/hbase
+  ├── /master                    → Current active HMaster address
+  ├── /backup-masters            → Standby HMaster list
+  ├── /rs                        → RegionServer list
+  │    ├── /rs/server1:16020    → RegionServer 1 (ephemeral node)
+  │    ├── /rs/server2:16020    → RegionServer 2 (ephemeral node)
+  │    └── /rs/server3:16020    → RegionServer 3 (ephemeral node)
+  ├── /table                     → Table metadata
+  ├── /table-lock                → Table operation locks
+  └── /root-region-server        → Where is META region?
+
+Ephemeral Nodes:
+- Node exists only while server is alive
+- If server crashes, node disappears
+- Automatic failure detection!
+            </div>
+
+            <h4>Example: Failure Detection</h4>
+            <div class="visual">
+Normal Operation:
+1. RegionServer 2 starts
+2. Creates ephemeral node: /hbase/rs/server2:16020
+3. Sends heartbeat to ZooKeeper every 30 seconds
+4. ZooKeeper keeps node alive
+
+Failure Scenario:
+1. RegionServer 2 crashes (hardware failure)
+2. No more heartbeats
+3. After 60 seconds (2 missed heartbeats):
+   - ZooKeeper deletes /hbase/rs/server2:16020
+4. HMaster gets notification (watching /hbase/rs)
+5. HMaster takes action:
+   - Mark RegionServer 2 as dead
+   - Replay WAL to recover in-flight writes
+   - Reassign regions to other servers
+   - Within 2-3 minutes: full recovery!
+            </div>
+        </div>
+
+        <h3>4. HDFS (Storage Layer)</h3>
+        <div class="architecture-box">
+            <h4>Why HDFS?</h4>
+            <ul>
+                <li><strong>Distributed Storage:</strong> Files split into blocks, spread across cluster</li>
+                <li><strong>Replication:</strong> Each block replicated 3x (configurable)</li>
+                <li><strong>Fault Tolerance:</strong> Automatic re-replication on failure</li>
+                <li><strong>Scalability:</strong> Add more DataNodes to increase capacity</li>
+                <li><strong>Data Locality:</strong> Computation runs where data lives (reduces network)</li>
+            </ul>
+
+            <h4>HFile Storage in HDFS</h4>
+            <div class="visual">
+HFile (1 GB) stored in HDFS:
+
+Logical View (HBase):
+┌──────────────────────────────────────┐
+│ region1-cf1-0001.hfile (1 GB)       │
+│ Contains 10 million rows             │
+└──────────────────────────────────────┘
+
+Physical View (HDFS):
+┌──────────────────────────────────────┐
+│ Split into 8 blocks (128 MB each)   │
+├──────────────────────────────────────┤
+│ Block 1 (128 MB)                     │
+│   Copy 1: DataNode 1                 │
+│   Copy 2: DataNode 2                 │
+│   Copy 3: DataNode 5                 │
+├──────────────────────────────────────┤
+│ Block 2 (128 MB)                     │
+│   Copy 1: DataNode 3                 │
+│   Copy 2: DataNode 4                 │
+│   Copy 3: DataNode 1                 │
+├──────────────────────────────────────┤
+│ ... (6 more blocks)                  │
+└──────────────────────────────────────┘
+
+Benefits:
+- If DataNode 1 dies: Blocks 1, 2 still accessible from replicas
+- Parallel reads: Read different blocks from different nodes
+- No single point of failure
+            </div>
+        </div>
+
+        <!-- HBASE OPERATIONS -->
+        <h2 id="hbase-operations">HBase Operations</h2>
+
+        <h3>Write Path (Put Operation)</h3>
+        <div class="solution-box">
+            <h4>Step-by-Step Write Flow</h4>
+            <ol>
+                <li><strong>Client Request</strong>
+                    <ul>
+                        <li>Client: <code>put("users", "user123", "name", "Alice")</code></li>
+                    </ul>
+                </li>
+                <li><strong>Locate Region</strong>
+                    <ul>
+                        <li>Client checks local cache: Which RegionServer has "user123"?</li>
+                        <li>If cache miss: Query META table (special system table)</li>
+                        <li>META table returns: "user123 is in Region 5 on RegionServer 2"</li>
+                        <li>Client caches this mapping</li>
+                    </ul>
+                </li>
+                <li><strong>Route to RegionServer</strong>
+                    <ul>
+                        <li>Client sends RPC to RegionServer 2</li>
+                    </ul>
+                </li>
+                <li><strong>RegionServer Processing</strong>
+                    <ul>
+                        <li><strong>Step 1: WAL Write</strong>
+                            <ul>
+                                <li>Append mutation to WAL on HDFS</li>
+                                <li>Sequential write (fast)</li>
+                                <li>Call hsync() for durability</li>
+                                <li>Time: ~1-5 ms</li>
+                            </ul>
+                        </li>
+                        <li><strong>Step 2: MemStore Write</strong>
+                            <ul>
+                                <li>Insert into in-memory sorted structure</li>
+                                <li>Time: ~10 microseconds</li>
+                            </ul>
+                        </li>
+                        <li><strong>Step 3: Return Success</strong>
+                            <ul>
+                                <li>ACK sent to client</li>
+                                <li>Total latency: ~1-10 ms</li>
+                            </ul>
+                        </li>
+                    </ul>
+                </li>
+                <li><strong>Background: MemStore Flush</strong>
+                    <ul>
+                        <li>When MemStore reaches 128 MB (configurable)</li>
+                        <li>Flush to new HFile on HDFS</li>
+                        <li>Clear MemStore for new writes</li>
+                        <li>Update META table with new HFile</li>
+                    </ul>
+                </li>
+            </ol>
+        </div>
+
+        <div class="visual">
+Write Path Visualization:
+
+Client                      RegionServer 2              HDFS
+  │                              │                        │
+  │  PUT(user123, name, Alice)   │                        │
+  ├─────────────────────────────→│                        │
+  │                              │                        │
+  │                              │  Append to WAL         │
+  │                              ├───────────────────────→│
+  │                              │                        │
+  │                              │  WAL sync complete     │
+  │                              │←───────────────────────┤
+  │                              │                        │
+  │                              │  Write to MemStore     │
+  │                              │  (RAM, instant)        │
+  │                              │                        │
+  │  Success (ACK)               │                        │
+  │←─────────────────────────────┤                        │
+  │                              │                        │
+  │                              │                        │
+  │                      [Time passes, MemStore fills]    │
+  │                              │                        │
+  │                              │  Flush MemStore        │
+  │                              ├───────────────────────→│
+  │                              │  Create HFile          │
+  │                              │  (Background async)    │
+  │                              │                        │
+        </div>
+
+        <h3>Read Path (Get Operation)</h3>
+        <div class="solution-box">
+            <h4>Step-by-Step Read Flow</h4>
+            <ol>
+                <li><strong>Client Request</strong>
+                    <ul>
+                        <li>Client: <code>get("users", "user123", "name")</code></li>
+                    </ul>
+                </li>
+                <li><strong>Locate Region</strong>
+                    <ul>
+                        <li>Same as write: Check cache or query META table</li>
+                        <li>Route to correct RegionServer</li>
+                    </ul>
+                </li>
+                <li><strong>RegionServer Processing</strong>
+                    <ul>
+                        <li><strong>Check BlockCache</strong> (RAM)
+                            <ul>
+                                <li>Is data block for "user123" cached?</li>
+                                <li>If YES: Return immediately (1-10 microseconds)</li>
+                            </ul>
+                        </li>
+                        <li><strong>Check MemStore</strong> (RAM)
+                            <ul>
+                                <li>Most recent writes are here</li>
+                                <li>Binary search: O(log n)</li>
+                                <li>Time: ~10 microseconds</li>
+                            </ul>
+                        </li>
+                        <li><strong>Check HFiles</strong> (Disk via HDFS)
+                            <ul>
+                                <li>May need to check multiple HFiles (similar to LSM L0, L1, L2)</li>
+                                <li>For each HFile:
+                                    <ul>
+                                        <li>Check Bloom filter (in cache)</li>
+                                        <li>If "maybe present": Read data block from HDFS</li>
+                                        <li>Time: ~1-10 ms per HFile</li>
+                                    </ul>
+                                </li>
+                            </ul>
+                        </li>
+                        <li><strong>Merge Results</strong>
+                            <ul>
+                                <li>Combine results from MemStore + HFiles</li>
+                                <li>Take newest version (based on timestamp)</li>
+                            </ul>
+                        </li>
+                    </ul>
+                </li>
+                <li><strong>Return to Client</strong>
+                    <ul>
+                        <li>Total latency: 1-20 ms (depending on cache hits)</li>
+                    </ul>
+                </li>
+            </ol>
+        </div>
+
+        <h3>Region Split</h3>
+        <div class="solution-box">
+            <h4>Why Split?</h4>
+            <p>Regions grow over time. When region exceeds threshold (e.g., 10 GB), split into two smaller regions for better load distribution.</p>
+
+            <h4>Split Process</h4>
+            <ol>
+                <li><strong>Detection</strong>
+                    <ul>
+                        <li>RegionServer monitors region size</li>
+                        <li>When size > 10 GB, trigger split</li>
+                    </ul>
+                </li>
+                <li><strong>Split Point Selection</strong>
+                    <ul>
+                        <li>Find middle key (median)</li>
+                        <li>Example: Region has keys A-Z, split at M</li>
+                    </ul>
+                </li>
+                <li><strong>Create Two New Regions</strong>
+                    <ul>
+                        <li>Region 1: Keys A-M</li>
+                        <li>Region 2: Keys N-Z</li>
+                        <li><strong>Important:</strong> HFiles are NOT rewritten!
+                            <ul>
+                                <li>Both regions reference same HFiles</li>
+                                <li>Use key ranges to filter data</li>
+                                <li>Zero data copying (instant split!)</li>
+                            </ul>
+                        </li>
+                    </ul>
+                </li>
+                <li><strong>Update META Table</strong>
+                    <ul>
+                        <li>Delete old region entry</li>
+                        <li>Add two new region entries</li>
+                    </ul>
+                </li>
+                <li><strong>Notify HMaster</strong>
+                    <ul>
+                        <li>HMaster may move one region to different server (load balancing)</li>
+                    </ul>
+                </li>
+            </ol>
+        </div>
+
+        <div class="visual">
+Region Split Example:
+
+Before Split:
+┌─────────────────────────────────────────────┐
+│ Region 1: Keys A-Z (10 GB)                  │
+│ RegionServer 1                              │
+│                                             │
+│ HFiles:                                     │
+│ - hfile-001.hfile (2 GB)                    │
+│ - hfile-002.hfile (3 GB)                    │
+│ - hfile-003.hfile (5 GB)                    │
+└─────────────────────────────────────────────┘
+
+After Split (instant, no data copy):
+┌───────────────────────────────────────────┐
+│ Region 1a: Keys A-M (5 GB)                │
+│ RegionServer 1                            │
+│                                           │
+│ HFiles (references same files):           │
+│ - hfile-001.hfile (read only A-M)         │
+│ - hfile-002.hfile (read only A-M)         │
+│ - hfile-003.hfile (read only A-M)         │
+└───────────────────────────────────────────┘
+
+┌───────────────────────────────────────────┐
+│ Region 1b: Keys N-Z (5 GB)                │
+│ RegionServer 2 (moved by HMaster)         │
+│                                           │
+│ HFiles (references same files):           │
+│ - hfile-001.hfile (read only N-Z)         │
+│ - hfile-002.hfile (read only N-Z)         │
+│ - hfile-003.hfile (read only N-Z)         │
+└───────────────────────────────────────────┘
+
+Later (compaction creates region-specific HFiles):
+- Region 1a compacts → new HFiles with only A-M data
+- Region 1b compacts → new HFiles with only N-Z data
+- Old HFiles deleted when no longer referenced
+        </div>
+
+        <h3>Compaction</h3>
+        <div class="solution-box">
+            <h4>Minor Compaction</h4>
+            <ul>
+                <li>Merge small HFiles into larger ones</li>
+                <li>Similar to LSM tree compaction</li>
+                <li>Removes deleted cells (tombstones)</li>
+                <li>Runs automatically in background</li>
+            </ul>
+
+            <h4>Major Compaction</h4>
+            <ul>
+                <li>Merge ALL HFiles in a region into one</li>
+                <li>Removes all deleted cells and expired versions</li>
+                <li>Can be I/O intensive (read all HFiles, write new one)</li>
+                <li>Usually scheduled during low-traffic hours</li>
+            </ul>
+        </div>
+
+        <!-- HBASE ADVANCED FEATURES -->
+        <h2 id="hbase-features">HBase Advanced Features</h2>
+
+        <h3>1. Column Families</h3>
+        <div class="architecture-box">
+            <h4>Concept</h4>
+            <p>Group related columns together for storage and performance optimization.</p>
+
+            <h4>Example Schema</h4>
+            <div class="visual">
+Table: users
+
+Row Key: user123
+
+Column Families:
+  ├── profile:
+  │    ├── profile:name = "Alice"
+  │    ├── profile:age = "30"
+  │    └── profile:email = "alice@example.com"
+  │
+  └── stats:
+       ├── stats:login_count = "1523"
+       ├── stats:last_login = "2024-03-11"
+       └── stats:total_posts = "42"
+
+Storage:
+- Each column family stored in separate HFiles
+- profile: Changes rarely → fewer flushes/compactions
+- stats: Changes frequently → more flushes
+
+Benefits:
+- Read only needed column families
+- Different compression per family
+- Different TTL (time-to-live) per family
+            </div>
+
+            <h4>Why Column Families?</h4>
+            <ul>
+                <li><strong>I/O Efficiency:</strong> Read only relevant data
+                    <ul>
+                        <li>Query: "Get user profile" → Read only profile family, skip stats</li>
+                        <li>Saves disk I/O and network bandwidth</li>
+                    </ul>
+                </li>
+                <li><strong>Storage Optimization:</strong> Different settings per family
+                    <ul>
+                        <li>profile: GZIP compression (high ratio, slower)</li>
+                        <li>stats: Snappy compression (fast, lower ratio)</li>
+                    </ul>
+                </li>
+                <li><strong>Retention Policies:</strong> Different TTL
+                    <ul>
+                        <li>profile: Keep forever</li>
+                        <li>stats: Keep only 30 days (auto-delete old versions)</li>
+                    </ul>
+                </li>
+            </ul>
+        </div>
+
+        <h3>2. Cell Versioning</h3>
+        <div class="architecture-box">
+            <h4>Concept</h4>
+            <p>HBase stores multiple versions of each cell, timestamped.</p>
+
+            <h4>Example</h4>
+            <div class="visual">
+Row Key: user123
+Column: profile:name
+
+Versions (stored internally):
+  Timestamp: 1678901234000 → "Alice"    (most recent)
+  Timestamp: 1678800000000 → "Alicia"
+  Timestamp: 1678700000000 → "Ali"
+
+Default Behavior:
+- Get returns most recent: "Alice"
+- Can query historical: get(timestamp=1678800000000) → "Alicia"
+
+Configuration:
+- Max versions: 3 (keep only last 3 updates)
+- TTL: 30 days (auto-delete versions older than 30 days)
+            </div>
+
+            <h4>Use Cases</h4>
+            <ul>
+                <li><strong>Audit Trail:</strong> Track all changes to sensitive data</li>
+                <li><strong>Time-Series Data:</strong> Store sensor readings over time</li>
+                <li><strong>Undo/History:</strong> Revert to previous state</li>
+            </ul>
+        </div>
+
+        <h3>3. Filters and Coprocessors</h3>
+        <div class="architecture-box">
+            <h4>Filters</h4>
+            <p>Server-side data filtering to reduce network transfer.</p>
+            <ul>
+                <li><strong>RowFilter:</strong> Filter rows by key pattern</li>
+                <li><strong>ValueFilter:</strong> Filter by cell value</li>
+                <li><strong>ColumnPrefixFilter:</strong> Get all columns starting with prefix</li>
+                <li><strong>PageFilter:</strong> Limit result size (pagination)</li>
+            </ul>
+            <p><strong>Benefit:</strong> Process 1 million rows on server, return only 100 to client</p>
+
+            <h4>Coprocessors</h4>
+            <p>Custom code that runs on RegionServer (like database stored procedures).</p>
+            <p><strong>Types:</strong></p>
+            <ul>
+                <li><strong>Observer:</strong> Trigger on events (before/after put, delete, etc.)</li>
+                <li><strong>Endpoint:</strong> Custom RPC endpoints for complex queries</li>
+            </ul>
+            <p><strong>Use Cases:</strong></p>
+            <ul>
+                <li>Real-time aggregation (count, sum, average)</li>
+                <li>Access control (custom authorization logic)</li>
+                <li>Secondary indexing</li>
+            </ul>
+        </div>
+
+        <h3>4. Bulk Loading</h3>
+        <div class="architecture-box">
+            <h4>Problem</h4>
+            <p>Loading 1 billion rows via normal PUT operations is slow (network overhead, WAL writes).</p>
+
+            <h4>Solution: HFile Direct Upload</h4>
+            <ol>
+                <li><strong>Generate HFiles:</strong> Use MapReduce job to create sorted HFiles directly</li>
+                <li><strong>Upload to HDFS:</strong> Copy HFiles to HDFS</li>
+                <li><strong>Bulk Load:</strong> Tell HBase to "adopt" these HFiles
+                    <ul>
+                        <li>No WAL writes</li>
+                        <li>No MemStore</li>
+                        <li>Instant (just metadata update)</li>
+                    </ul>
+                </li>
+            </ol>
+            <p><strong>Performance:</strong> 100x faster than normal writes for large imports</p>
+        </div>
+
+        <h3>5. Snapshots and Backup</h3>
+        <div class="architecture-box">
+            <h4>Snapshots</h4>
+            <ul>
+                <li>Instant point-in-time copy of table</li>
+                <li>Uses HDFS snapshots (no data copying!)</li>
+                <li>Can restore or clone tables from snapshot</li>
+            </ul>
+
+            <h4>Backup/Restore</h4>
+            <ul>
+                <li>Export table to external storage (S3, another HDFS cluster)</li>
+                <li>Incremental backups supported</li>
+                <li>Cross-cluster replication for disaster recovery</li>
+            </ul>
+        </div>
+
+        <!-- COMPARISON -->
+        <h2 id="comparison">HBase vs Simple LSM Implementation</h2>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Feature</th>
+                    <th>Your LSM Implementation</th>
+                    <th>HBase</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Storage Capacity</strong></td>
+                    <td>Single machine limit (~10 TB max)</td>
+                    <td>Petabytes (distributed across cluster)</td>
+                </tr>
+                <tr>
+                    <td><strong>Fault Tolerance</strong></td>
+                    <td>Machine dies = data lost</td>
+                    <td>3x replication, survives multiple failures</td>
+                </tr>
+                <tr>
+                    <td><strong>Scalability</strong></td>
+                    <td>Vertical only (buy bigger machine)</td>
+                    <td>Horizontal (add more machines)</td>
+                </tr>
+                <tr>
+                    <td><strong>Throughput</strong></td>
+                    <td>Single machine limit (~50K writes/sec)</td>
+                    <td>Millions of writes/sec (distributed)</td>
+                </tr>
+                <tr>
+                    <td><strong>High Availability</strong></td>
+                    <td>Downtime during failures/maintenance</td>
+                    <td>Zero downtime, automatic failover</td>
+                </tr>
+                <tr>
+                    <td><strong>Load Balancing</strong></td>
+                    <td>Not applicable (single machine)</td>
+                    <td>Automatic region balancing</td>
+                </tr>
+                <tr>
+                    <td><strong>Schema Management</strong></td>
+                    <td>Manual implementation needed</td>
+                    <td>Tables, column families, versioning</td>
+                </tr>
+                <tr>
+                    <td><strong>Client Protocol</strong></td>
+                    <td>Build your own (TCP? HTTP?)</td>
+                    <td>Java API, REST, Thrift, Protobuf</td>
+                </tr>
+                <tr>
+                    <td><strong>Monitoring</strong></td>
+                    <td>Build from scratch</td>
+                    <td>JMX metrics, web UI, Ganglia integration</td>
+                </tr>
+                <tr>
+                    <td><strong>Backup/Restore</strong></td>
+                    <td>Custom scripts</td>
+                    <td>Built-in snapshots, export/import</td>
+                </tr>
+                <tr>
+                    <td><strong>Security</strong></td>
+                    <td>Build authentication/authorization</td>
+                    <td>Kerberos, ACLs, cell-level security</td>
+                </tr>
+                <tr>
+                    <td><strong>Operational Maturity</strong></td>
+                    <td>Untested, bugs, edge cases</td>
+                    <td>10+ years in production at scale</td>
+                </tr>
+                <tr>
+                    <td><strong>Community Support</strong></td>
+                    <td>You're alone</td>
+                    <td>Apache project, huge community, docs</td>
+                </tr>
+                <tr>
+                    <td><strong>Time to Production</strong></td>
+                    <td>2-3 years (if you're lucky)</td>
+                    <td>Weeks (download, configure, deploy)</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="warning-box">
+            <h3>Real Talk: Building Production Databases is HARD</h3>
+            <p>Even if you implement a perfect LSM tree, you're still 5% done:</p>
+            <ul>
+                <li>🔴 <strong>Distributed Systems:</strong> 1-2 years of engineering
+                    <ul>
+                        <li>Consensus algorithms (Raft/Paxos)</li>
+                        <li>Network partitions and split-brain</li>
+                        <li>Distributed transactions</li>
+                        <li>Clock skew and time synchronization</li>
+                    </ul>
+                </li>
+                <li>🔴 <strong>Operational Tools:</strong> 6-12 months
+                    <ul>
+                        <li>Monitoring dashboards</li>
+                        <li>Alerting and on-call runbooks</li>
+                        <li>Performance profiling</li>
+                        <li>Debugging tools</li>
+                    </ul>
+                </li>
+                <li>🔴 <strong>Production Hardening:</strong> Years of bug fixes
+                    <ul>
+                        <li>Data corruption edge cases</li>
+                        <li>Memory leaks under load</li>
+                        <li>Race conditions in concurrent code</li>
+                        <li>Network timeout handling</li>
+                    </ul>
+                </li>
+                <li>🔴 <strong>Performance Optimization:</strong> Ongoing
+                    <ul>
+                        <li>Compaction tuning per workload</li>
+                        <li>Cache sizing and eviction policies</li>
+                        <li>Bloom filter tuning</li>
+                        <li>Compression algorithm selection</li>
+                    </ul>
+                </li>
+            </ul>
+            <p><strong>Reality Check:</strong> Companies like Google (Bigtable), Facebook (Cassandra), and Apache (HBase) spent <em>hundreds of person-years</em> building these systems.</p>
+        </div>
+
+        <!-- SUMMARY -->
+        <h2>Summary</h2>
+
+        <div class="solution-box">
+            <h3>Why You Need HBase (Not Just LSM Tree)</h3>
+            
+            <h4>1. Distribution</h4>
+            <ul>
+                <li>Store petabytes across thousands of machines</li>
+                <li>Automatic data partitioning (regions)</li>
+                <li>Linear scalability (add machines = add capacity)</li>
+            </ul>
+
+            <h4>2. Fault Tolerance</h4>
+            <ul>
+                <li>3x replication via HDFS</li>
+                <li>Automatic failure detection (ZooKeeper)</li>
+                <li>Automatic recovery (WAL replay)</li>
+                <li>Zero data loss on machine failures</li>
+            </ul>
+
+            <h4>3. High Availability</h4>
+            <ul>
+                <li>No single point of failure</li>
+                <li>Active-standby HMaster</li>
+                <li>Automatic failover in minutes</li>
+                <li>Rolling upgrades (zero downtime)</li>
+            </ul>
+
+            <h4>4. Operational Maturity</h4>
+            <ul>
+                <li>10+ years of production use</li>
+                <li>Battle-tested at web scale (Yahoo, Facebook, Twitter)</li>
+                <li>Comprehensive monitoring and debugging tools</li>
+                <li>Large community and ecosystem</li>
+            </ul>
+
+            <h4>5. Rich Feature Set</h4>
+            <ul>
+                <li>Column families and versioning</li>
+                <li>Filters and coprocessors</li>
+                <li>Bulk loading and snapshots</li>
+                <li>Security (authentication, authorization, encryption)</li>
+            </ul>
+        </div>
+
+        <div class="key-point" style="font-size: 1.1em; margin-top: 30px;">
+            <strong>Bottom Line:</strong> LSM tree is the <em>engine</em>, HBase is the <em>complete car</em>.
+            <br><br>
+            Just like you wouldn't build a car from scratch when you can buy a Tesla, you shouldn't build a distributed database from scratch when you can use HBase.
+            <br><br>
+            <strong>Focus your time on your application logic, not reinventing database infrastructure.</strong>
+        </div>
+
+        <footer style="text-align: center; margin-top: 50px; padding: 30px; background: #f8f9fa; border-radius: 10px; color: #666;">
+            <p style="font-size: 1.2em; font-weight: 600; color: #FF6B35;">HBase Deep Dive</p>
+            <p>Understanding the gap between LSM trees and production distributed databases</p>
+        </footer>
+    </div>
+</body>
+</html>

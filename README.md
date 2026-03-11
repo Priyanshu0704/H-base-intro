@@ -1,6 +1,6 @@
 # Database Data Structures - Deep Dive
 
-A comprehensive guide to **LSM Trees** and **B+ Trees**, the fundamental data structures powering modern databases.
+A comprehensive guide to **LSM Trees**, **B+ Trees**, and **HBase** - the fundamental data structures and systems powering modern databases.
 
 ## 🌐 Live Demo
 
@@ -37,8 +37,24 @@ Concise overview covering:
 
 **Used By:** MySQL, PostgreSQL, SQLite, SQL Server, Oracle
 
+### 🏗️ HBase (Distributed Database on LSM Trees)
+In-depth explanation covering:
+- **Why LSM Tree Alone Isn't Enough** - Single-node limitations (storage, failure, throughput, geography)
+- **Distributed Systems Concepts** - Partitioning, replication, consistency, coordination
+- **HBase Architecture** - HMaster, RegionServers, ZooKeeper, HDFS integration
+- **Data Model** - Regions, column families, cell versioning with timestamps
+- **Write Path** - Client location → WAL → MemStore → HFile flush → Compaction
+- **Read Path** - BlockCache → MemStore → HFiles with Bloom filter optimization
+- **Advanced Features** - Region splits, coprocessors, bulk loading, snapshots
+- **Production Considerations** - Why building production databases takes years
+
+**Use Cases:** Massive-scale data storage (petabytes), distributed systems, high availability requirements
+
+**Comparison:** LSM Tree (data structure) vs HBase (complete distributed database system)
+
 ## 🎯 Key Comparisons
 
+### LSM Tree vs B+ Tree
 | Aspect | LSM Tree | B+ Tree |
 |--------|----------|---------|
 | **Write Pattern** | Sequential (fast) | Random (slower) |
@@ -48,6 +64,16 @@ Concise overview covering:
 | **Space Efficiency** | 1.2-3x | 1.1-1.5x |
 | **Background Work** | Heavy (compaction) | None |
 | **Best For** | Write-heavy | Read-heavy |
+
+### LSM Tree vs HBase
+| Aspect | LSM Tree | HBase |
+|--------|----------|-------|
+| **Type** | Data structure | Complete distributed database |
+| **Scale** | Single machine | Thousands of machines |
+| **Storage** | Limited by disk | Petabytes via HDFS |
+| **Fault Tolerance** | None | 3x replication, auto-recovery |
+| **Availability** | Single point of failure | High availability via ZooKeeper |
+| **Development Time** | Days-weeks | Years (10+ person-years) |
 
 ## 🚀 Features
 
@@ -86,6 +112,14 @@ open index.html
 - Prefix compression
 - Compaction strategies
 - Tree balancing
+
+### Distributed Systems Concepts
+- Data partitioning and sharding
+- Replication and consistency
+- Distributed coordination (ZooKeeper)
+- Fault tolerance and recovery
+- Load balancing
+- Leader election
 
 ## 🎓 Perfect For
 
