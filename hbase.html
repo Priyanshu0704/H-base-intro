@@ -1333,6 +1333,496 @@ Benefits:
             </div>
         </div>
 
+        <!-- HDFS SHARED STORAGE ARCHITECTURE -->
+        <h3>Critical: HDFS is Shared Storage - HFiles Never Move!</h3>
+        <div class="architecture-box">
+            <h4>The Most Important Concept in HBase</h4>
+            <p><strong>Common Misconception:</strong> When a RegionServer fails, HFiles are copied/moved to another RegionServer.</p>
+            <p><strong>TRUTH:</strong> HFiles are NEVER moved! They stay on HDFS. The new RegionServer just opens the same files.</p>
+
+            <h4>Wrong vs Right Mental Model</h4>
+            <div class="visual">
+❌ WRONG Mental Model (Local Disk):
+
+RegionServer 1              RegionServer 2
+┌────────────────┐          ┌────────────────┐
+│ Local Disk     │          │ Local Disk     │
+│ ├─ region1.hfile│         │ ├─ region3.hfile│
+│ └─ region2.hfile│         │ └─ region4.hfile│
+└────────────────┘          └────────────────┘
+
+Problem: If RS2 dies, files are lost!
+Would need to: Copy files from RS2 to RS1 (slow, impossible if RS2 dead)
+
+════════════════════════════════════════════════════════════════
+
+✅ CORRECT Mental Model (Shared HDFS):
+
+RegionServer 1              RegionServer 2
+┌────────────────┐          ┌────────────────┐
+│ In-Memory Only:│          │ In-Memory Only:│
+│ ├─ MemStore    │          │ ├─ MemStore    │
+│ └─ BlockCache  │          │ └─ BlockCache  │
+└────────┬───────┘          └────────┬───────┘
+         │                           │
+         └─────────┬─────────────────┘
+                   ↓ (Read/Write via network)
+         ┌─────────────────────────┐
+         │   HDFS (Shared Storage) │
+         │   ┌─────────────────┐   │
+         │   │ /hbase/data/    │   │
+         │   │  ├─ region1/    │   │
+         │   │  │  └─ a.hfile  │   │ ← RS1 reads this
+         │   │  ├─ region2/    │   │
+         │   │  │  └─ b.hfile  │   │ ← RS1 reads this
+         │   │  ├─ region3/    │   │
+         │   │  │  └─ c.hfile  │   │ ← RS2 reads this
+         │   │  └─ region4/    │   │
+         │   │     └─ d.hfile  │   │ ← RS2 reads this
+         │   └─────────────────┘   │
+         │                         │
+         │ Each file replicated 3x │
+         └─────────────────────────┘
+
+Solution: If RS2 dies, RS1 just reads the same files!
+No copying needed! Just open file handles!
+            </div>
+
+            <h4>Complete Architecture: Compute vs Storage Separation</h4>
+            <div class="visual">
+HBase Cluster = Compute Layer + Storage Layer
+
+┌──────────────────────────────────────────────────────────────┐
+│              COMPUTE LAYER (Stateless)                       │
+│              RegionServers - Can die and restart quickly     │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐   │
+│  │   RS1    │  │   RS2    │  │   RS3    │  │   RS4    │   │
+│  │          │  │          │  │          │  │          │   │
+│  │ RAM only:│  │ RAM only:│  │ RAM only:│  │ RAM only:│   │
+│  │ MemStore │  │ MemStore │  │ MemStore │  │ MemStore │   │
+│  │BlkCache  │  │BlkCache  │  │BlkCache  │  │BlkCache  │   │
+│  │          │  │          │  │          │  │          │   │
+│  │ Serving: │  │ Serving: │  │ Serving: │  │ Serving: │   │
+│  │ Region A │  │ Region D │  │ Region G │  │ Region J │   │
+│  │ Region B │  │ Region E │  │ Region H │  │ Region K │   │
+│  │ Region C │  │ Region F │  │ Region I │  │ Region L │   │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘   │
+│       │             │             │             │          │
+└───────┼─────────────┼─────────────┼─────────────┼──────────┘
+        │             │             │             │
+        └─────────────┴─────────────┴─────────────┘
+                      ↓ Network ↓
+        ALL RegionServers read/write to SAME HDFS
+                      ↓ Network ↓
+┌──────────────────────────────────────────────────────────────┐
+│              STORAGE LAYER (Stateful)                        │
+│              HDFS - All persistent data, replicated 3x       │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│  HDFS Namespace (Logical View):                             │
+│  /hbase/                                                     │
+│    ├─ data/                                                  │
+│    │   └─ default/                                           │
+│    │       ├─ Users/                                         │
+│    │       │   ├─ region-A/ (served by RS1)                 │
+│    │       │   │   ├─ cf1/                                  │
+│    │       │   │   │   ├─ 001.hfile (500 MB)               │
+│    │       │   │   │   └─ 002.hfile (700 MB)               │
+│    │       │   │   └─ cf2/                                  │
+│    │       │   │       └─ 003.hfile (300 MB)               │
+│    │       │   ├─ region-B/ (served by RS1)                 │
+│    │       │   ├─ region-C/ (served by RS1)                 │
+│    │       │   ├─ region-D/ (served by RS2)                 │
+│    │       │   ├─ region-E/ (served by RS2)                 │
+│    │       │   ├─ region-F/ (served by RS2)                 │
+│    │       │   └─ ... (100 more regions)                    │
+│    │       │                                                 │
+│    │       ├─ Orders/                                        │
+│    │       │   ├─ region-G/ (served by RS3)                 │
+│    │       │   ├─ region-H/ (served by RS3)                 │
+│    │       │   └─ ...                                        │
+│    │       │                                                 │
+│    │       └─ Products/                                      │
+│    │           └─ ...                                        │
+│    │                                                         │
+│    ├─ WAL/                                                   │
+│    │   ├─ RS1,16020,12345/                                  │
+│    │   │   └─ RS1.log (sequential write log)               │
+│    │   ├─ RS2,16020,12346/                                  │
+│    │   │   └─ RS2.log                                       │
+│    │   └─ ...                                                │
+│    │                                                         │
+│    └─ hbase/ (system namespace)                             │
+│        └─ meta/ (META table region)                         │
+│            └─ 1588230740950.xyz/                            │
+│                └─ info/                                      │
+│                    └─ meta.hfile                            │
+│                                                              │
+│  ──────────────────────────────────────────────────────────  │
+│                                                              │
+│  Physical Storage (HDFS DataNodes):                         │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐   │
+│  │DataNode 1│  │DataNode 2│  │DataNode 3│  │DataNode 4│   │
+│  │/data/hdfs│  │/data/hdfs│  │/data/hdfs│  │/data/hdfs│   │
+│  │ Block 1  │  │ Block 1  │  │ Block 2  │  │ Block 3  │   │
+│  │ Block 2  │  │ Block 3  │  │ Block 3  │  │ Block 1  │   │
+│  │ Block 5  │  │ Block 4  │  │ Block 4  │  │ Block 2  │   │
+│  │ Block 6  │  │ Block 7  │  │ Block 8  │  │ Block 9  │   │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────┘   │
+│       ↑              ↑              ↑              ↑        │
+│       └──────────────┴──────────────┴──────────────┘        │
+│          Each block replicated 3x across DataNodes          │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+
+Key Insights:
+✅ RegionServers have NO persistent state (except RAM)
+✅ ALL persistent data lives on HDFS (network storage)
+✅ Any RegionServer can read any region's HFiles from HDFS
+✅ HDFS handles all replication (3x default)
+✅ Fast failure recovery: Just open file handles, no copying!
+            </div>
+
+            <h4>What Happens When RegionServer Fails: Complete Timeline</h4>
+            <div class="visual">
+BEFORE FAILURE (Normal Operation):
+═══════════════════════════════════════════════════════════════
+
+RegionServer 2 (server-02.example.com:16020)
+├─ Hosting: Region D, Region E, Region F
+├─ MemStore: 256 MB in RAM (pending flushes)
+├─ BlockCache: 8 GB in RAM (hot data)
+├─ Reading HFiles from HDFS when needed
+└─ Writing new HFiles to HDFS when MemStore flushes
+
+HDFS:
+/hbase/data/default/Users/
+  ├─ region-D/
+  │   ├─ cf1/
+  │   │   ├─ 001.hfile (1.5 GB) ← RS2 reads this
+  │   │   └─ 002.hfile (800 MB) ← RS2 reads this
+  │   └─ cf2/
+  │       └─ 003.hfile (2 GB)   ← RS2 reads this
+  ├─ region-E/
+  │   └─ cf1/
+  │       └─ 004.hfile (1.2 GB) ← RS2 reads this
+  └─ region-F/
+      └─ cf1/
+          └─ 005.hfile (900 MB) ← RS2 reads this
+
+
+T=0: REGIONSERVER 2 CRASHES
+═══════════════════════════════════════════════════════════════
+
+RegionServer 2 (DEAD)
+✗ Process killed (kernel panic / power outage / JVM crash)
+✗ MemStore LOST (256 MB of data in RAM - gone!)
+✗ BlockCache LOST (8 GB of cached data - gone!)
+✗ Network connections dropped
+✗ No more heartbeats to ZooKeeper
+
+BUT: HFiles still exist on HDFS! ✓✓✓
+     They were NEVER on RS2's local disk!
+     They're on HDFS DataNodes, replicated 3x!
+
+HDFS (FILES STILL THERE - UNCHANGED):
+/hbase/data/default/Users/
+  ├─ region-D/
+  │   ├─ cf1/
+  │   │   ├─ 001.hfile (1.5 GB) ← Still exists! ✓
+  │   │   └─ 002.hfile (800 MB) ← Still exists! ✓
+  │   └─ cf2/
+  │       └─ 003.hfile (2 GB)   ← Still exists! ✓
+  ├─ region-E/
+  │   └─ cf1/
+  │       └─ 004.hfile (1.2 GB) ← Still exists! ✓
+  └─ region-F/
+      └─ cf1/
+          └─ 005.hfile (900 MB) ← Still exists! ✓
+
+Also on HDFS:
+/hbase/WAL/RS2,16020,12345/
+  └─ RS2.log ← Contains uncommitted writes from MemStore
+
+
+T=0-30s: ZOOKEEPER WAITING FOR HEARTBEAT
+═══════════════════════════════════════════════════════════════
+
+ZooKeeper:
+  "RS2 missed heartbeat at 3s... waiting"
+  "RS2 missed heartbeat at 6s... waiting"
+  "RS2 missed heartbeat at 30s... SESSION TIMEOUT!"
+  
+  Action: Delete ephemeral node /hbase/rs/server-02...,16020,12345
+
+
+T=30s: HMASTER NOTIFIED
+═══════════════════════════════════════════════════════════════
+
+HMaster receives notification from ZooKeeper:
+  Event: NodeDeleted
+  Path: /hbase/rs/server-02.example.com,16020,12345
+
+HMaster internal state:
+  "RegionServer 2 is DEAD"
+  "RS2 was hosting: Region D, Region E, Region F"
+  "Need to reassign these regions ASAP"
+  
+HMaster decision:
+  "Assign Region D to RegionServer 1"
+  "Assign Region E to RegionServer 3"
+  "Assign Region F to RegionServer 1"
+
+
+T=32s: HMASTER SENDS ASSIGNMENT RPCS
+═══════════════════════════════════════════════════════════════
+
+HMaster → RegionServer 1:
+  RPC: OpenRegion(region-D)
+  RPC: OpenRegion(region-F)
+
+HMaster → RegionServer 3:
+  RPC: OpenRegion(region-E)
+
+
+T=33s: REGIONSERVER 1 OPENS REGION D
+═══════════════════════════════════════════════════════════════
+
+RegionServer 1 receives: OpenRegion(region-D)
+
+Step 1: Get Region Metadata
+  Query HDFS: "Where is region-D?"
+  HDFS returns: "/hbase/data/default/Users/region-D/"
+
+Step 2: List HFiles for Region D
+  HDFS API call: listFiles("/hbase/.../region-D/cf1/")
+  Returns:
+    - /hbase/.../region-D/cf1/001.hfile (1.5 GB)
+    - /hbase/.../region-D/cf1/002.hfile (800 MB)
+    - /hbase/.../region-D/cf2/003.hfile (2 GB)
+
+Step 3: Open File Handles (NO COPYING!)
+  For each HFile:
+    HDFS API: open("/hbase/.../region-D/cf1/001.hfile", READ_ONLY)
+    Returns: File handle (like a pointer)
+  
+  CRITICAL: No data copied! Just opened for reading!
+  RS1 will read blocks on-demand when clients request data
+
+Step 4: Load Bloom Filters into Memory
+  For each HFile:
+    Read Bloom filter metadata from HFile trailer
+    Load into RAM (~10 MB per file)
+  
+  Purpose: Fast negative lookups ("key not in this file")
+
+Step 5: Replay WAL (Recover Uncommitted Writes)
+  Find RS2's WAL: /hbase/WAL/RS2,16020,12345/RS2.log
+  Read WAL entries for Region D
+  Apply mutations to new MemStore
+  
+  Example:
+    WAL entry: PUT("user123", "name", "Alice")
+    → Insert into MemStore
+  
+  This recovers the 256 MB of data that was in RS2's MemStore!
+
+Step 6: Create New MemStore (Empty)
+  Allocate 128 MB for Region D's MemStore
+  Mark as ready for new writes
+
+Step 7: Mark Region as OPEN
+  Send RPC to HMaster: "Region D is OPEN and serving"
+  HMaster updates META table:
+    "Region D is now on server-01.example.com:16020"
+
+Region D is now ONLINE on RegionServer 1!
+Total time: 10-20 seconds
+
+
+T=33-50s: OTHER REGIONS OPENED SIMILARLY
+═══════════════════════════════════════════════════════════════
+
+RegionServer 1: Opens Region F (same process as Region D)
+RegionServer 3: Opens Region E (same process)
+
+All regions recovered by T=50s
+
+
+T=50s: HMASTER UPDATES METADATA
+═══════════════════════════════════════════════════════════════
+
+HMaster updates META table:
+  Before:
+    "Region D" → "server-02.example.com:16020"
+    "Region E" → "server-02.example.com:16020"
+    "Region F" → "server-02.example.com:16020"
+  
+  After:
+    "Region D" → "server-01.example.com:16020" ✓
+    "Region E" → "server-03.example.com:16020" ✓
+    "Region F" → "server-01.example.com:16020" ✓
+
+HMaster internal state:
+  Mark RS2 as DEAD
+  Remove RS2 from load balancing calculations
+
+
+T=51s+: CLIENTS DISCOVER NEW LOCATIONS
+═══════════════════════════════════════════════════════════════
+
+Client tries to read:
+  get("Users", "user123")
+
+Step 1: Check cache
+  Cache: "user123 is on server-02.example.com:16020"
+
+Step 2: Try to connect to RS2
+  Result: Connection refused (RS2 is dead)
+
+Step 3: Invalidate cache
+  Remove cached location for Region D
+
+Step 4: Query META table
+  "Where is user123 now?"
+  META returns: "server-01.example.com:16020" (new location)
+
+Step 5: Connect to RS1
+  Send RPC to RS1: get("user123")
+
+Step 6: RS1 serves the request
+  Check MemStore: Not found
+  Check BlockCache: Not found (cold start)
+  Read from HFile on HDFS:
+    - Open /hbase/.../region-D/cf1/001.hfile
+    - Check Bloom filter: "user123 might be in this file"
+    - Read data block containing "user123"
+    - Load into BlockCache
+    - Return to client
+
+Step 7: Update client cache
+  Cache: "user123 is on server-01.example.com:16020"
+
+Future reads of user123: Direct to RS1 (cached!)
+
+
+FINAL STATE (After Recovery):
+═══════════════════════════════════════════════════════════════
+
+RegionServer 1 (server-01.example.com:16020)
+├─ Now hosting: Region A, Region B, Region C, Region D, Region F
+├─ Reading Region D and F HFiles from HDFS
+└─ THE EXACT SAME HFiles that RS2 was reading!
+
+HDFS (FILES NEVER MOVED):
+/hbase/data/default/Users/
+  ├─ region-D/
+  │   ├─ cf1/
+  │   │   ├─ 001.hfile (1.5 GB) ← RS1 reads now (was RS2)
+  │   │   └─ 002.hfile (800 MB) ← RS1 reads now (was RS2)
+  │   └─ cf2/
+  │       └─ 003.hfile (2 GB)   ← RS1 reads now (was RS2)
+  └─ ...
+
+Recovery Summary:
+  Total time: 30-60 seconds
+  Data copied: ZERO BYTES!
+  Data lost: Only uncommitted MemStore (recovered from WAL)
+  HFiles moved: NONE! (just opened by new RegionServer)
+  Client impact: Brief unavailability, then automatic failover
+            </div>
+
+            <h4>Why This Architecture is Brilliant</h4>
+            <table>
+                <tr>
+                    <th>Benefit</th>
+                    <th>How HDFS Enables It</th>
+                    <th>Traditional Approach</th>
+                </tr>
+                <tr>
+                    <td><strong>Fast Failure Recovery</strong></td>
+                    <td>Just open file handles (seconds)<br>No data copying needed</td>
+                    <td>Copy GBs of data to new server (hours)</td>
+                </tr>
+                <tr>
+                    <td><strong>No Data Loss</strong></td>
+                    <td>HFiles on HDFS (3x replicated)<br>WAL on HDFS for MemStore recovery</td>
+                    <td>Local disk fails = data lost<br>Need complex RAID</td>
+                </tr>
+                <tr>
+                    <td><strong>Easy Load Balancing</strong></td>
+                    <td>Update META table: "Region X now on RS2"<br>RS2 opens same files (instant!)</td>
+                    <td>Copy data to new server (slow)<br>Downtime during move</td>
+                </tr>
+                <tr>
+                    <td><strong>Storage Elasticity</strong></td>
+                    <td>Add HDFS DataNodes independently<br>Doesn't affect RegionServers</td>
+                    <td>Add storage to each server<br>Downtime required</td>
+                </tr>
+                <tr>
+                    <td><strong>Compute Elasticity</strong></td>
+                    <td>Add RegionServers independently<br>Doesn't affect storage</td>
+                    <td>Must provision storage + compute together</td>
+                </tr>
+                <tr>
+                    <td><strong>Fault Tolerance</strong></td>
+                    <td>Multiple layers:<br>- RegionServer dies: Reassign<br>- DataNode dies: HDFS re-replicates<br>- Disk dies: HDFS handles it</td>
+                    <td>Single layer: RAID<br>Multiple disk failures = disaster</td>
+                </tr>
+                <tr>
+                    <td><strong>Data Locality</strong></td>
+                    <td>HDFS schedules reads from local DataNode when possible<br>Reduces network traffic</td>
+                    <td>All reads over network<br>High network utilization</td>
+                </tr>
+            </table>
+
+            <h4>Common Questions Answered</h4>
+            <div class="visual">
+Q: Do RegionServers communicate with each other?
+A: NO! Each RS is independent. They only talk to:
+   - ZooKeeper (heartbeats)
+   - HMaster (assignments, metrics)
+   - HDFS (read/write data)
+   - Clients (serve requests)
+
+Q: When HMaster is down, does RS1 know about RS2's regions?
+A: NO, and it doesn't need to! Each RS only knows about its 
+   own assigned regions. HMaster is needed only to assign new
+   regions (during failures or load balancing).
+
+Q: Are HFiles copied when a region moves?
+A: NO! NEVER! The files stay on HDFS. The new RegionServer
+   just opens file handles to the same files on HDFS.
+
+Q: How long does it take to "move" a 10 GB region?
+A: 10-30 seconds! Because nothing is copied! Just:
+   - Open file handles (~1 second)
+   - Load Bloom filters (~5-10 seconds)
+   - Replay WAL if needed (~5-20 seconds)
+   Total: Metadata operations only!
+
+Q: What if the DataNode with the HFile dies?
+A: HDFS automatically serves the data from one of the other
+   2 replicas! Then HDFS re-replicates to restore 3x.
+   RegionServer doesn't even know this happened!
+
+Q: Can I have RegionServers without HDFS?
+A: Technically yes (using local filesystem), but you lose:
+   - Fault tolerance
+   - Fast failure recovery
+   - Easy load balancing
+   - Storage/compute separation
+   Not recommended for production!
+
+Q: Is HDFS shared across all RegionServers?
+A: YES! This is FUNDAMENTAL to HBase architecture!
+   One HDFS cluster serves ALL RegionServers.
+   This is what makes fast failover possible.
+            </div>
+        </div>
+
         <!-- HBASE OPERATIONS -->
         <h2 id="hbase-operations">HBase Operations</h2>
 
