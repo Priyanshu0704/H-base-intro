@@ -1,0 +1,1559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LSM Tree Deep Dive</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+            padding: 40px;
+        }
+
+        h1 {
+            color: #667eea;
+            text-align: center;
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            border-bottom: 4px solid #667eea;
+            padding-bottom: 15px;
+        }
+
+        h2 {
+            color: #764ba2;
+            font-size: 1.8em;
+            margin-top: 40px;
+            margin-bottom: 20px;
+            border-left: 5px solid #764ba2;
+            padding-left: 15px;
+        }
+
+        h3 {
+            color: #555;
+            font-size: 1.4em;
+            margin-top: 30px;
+            margin-bottom: 15px;
+            border-bottom: 2px solid #ddd;
+            padding-bottom: 8px;
+        }
+
+        h4 {
+            color: #666;
+            font-size: 1.2em;
+            margin-top: 20px;
+            margin-bottom: 10px;
+            font-weight: 600;
+        }
+
+        p {
+            margin-bottom: 15px;
+            text-align: justify;
+        }
+
+        ul, ol {
+            margin-left: 30px;
+            margin-bottom: 20px;
+        }
+
+        li {
+            margin-bottom: 8px;
+        }
+
+        .architecture-box {
+            background: #f8f9fa;
+            border: 2px solid #667eea;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+
+        .component-box {
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 5px;
+        }
+
+        .flow-box {
+            background: #d1ecf1;
+            border-left: 4px solid #17a2b8;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 5px;
+        }
+
+        .comparison-box {
+            background: #d4edda;
+            border-left: 4px solid #28a745;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 5px;
+        }
+
+        .warning-box {
+            background: #f8d7da;
+            border-left: 4px solid #dc3545;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 5px;
+        }
+
+        .code-block {
+            background: #2d2d2d;
+            color: #f8f8f2;
+            padding: 20px;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin: 15px 0;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+        }
+
+        .highlight {
+            background: #fff3cd;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-weight: 600;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        th {
+            background: #667eea;
+            color: white;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+        }
+
+        td {
+            padding: 12px;
+            border-bottom: 1px solid #ddd;
+        }
+
+        tr:nth-child(even) {
+            background: #f8f9fa;
+        }
+
+        tr:hover {
+            background: #e9ecef;
+        }
+
+        .emoji {
+            font-size: 1.3em;
+            margin-right: 5px;
+        }
+
+        .section-intro {
+            font-size: 1.1em;
+            color: #555;
+            font-style: italic;
+            margin-bottom: 25px;
+            padding: 15px;
+            background: #f0f0f0;
+            border-radius: 8px;
+        }
+
+        .key-point {
+            background: #e7f3ff;
+            border-left: 4px solid #2196F3;
+            padding: 12px;
+            margin: 12px 0;
+            border-radius: 4px;
+        }
+
+        .visual-diagram {
+            background: white;
+            border: 2px solid #ddd;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+            font-family: monospace;
+            white-space: pre;
+            overflow-x: auto;
+        }
+
+        .toc {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 30px 0;
+        }
+
+        .toc a {
+            color: #667eea;
+            text-decoration: none;
+            font-weight: 500;
+        }
+
+        .toc a:hover {
+            text-decoration: underline;
+        }
+
+        strong {
+            color: #764ba2;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>LSM Tree: Complete Deep Dive</h1>
+        <p style="text-align: center; font-size: 1.1em; color: #666; margin-bottom: 30px;">
+            Log-Structured Merge Tree - Architecture, Operations & Implementation
+        </p>
+
+        <div class="toc">
+            <h3>Table of Contents</h3>
+            <ol>
+                <li><a href="#architecture">Architecture Overview</a></li>
+                <li><a href="#write-operation">Write Operation</a></li>
+                <li><a href="#read-operation">Read Operation</a></li>
+                <li><a href="#delete-operation">Delete Operation</a></li>
+                <li><a href="#compaction">Compaction Process</a></li>
+                <li><a href="#levels">Level Structure (L0, L1, L2...)</a></li>
+                <li><a href="#memtable">MemTable Structure</a></li>
+                <li><a href="#sstable">SSTable Structure</a></li>
+                <li><a href="#bloom-filter">Bloom Filters</a></li>
+                <li><a href="#comparison">LSM vs B+ Tree</a></li>
+            </ol>
+        </div>
+
+        <!-- ARCHITECTURE -->
+        <h2 id="architecture"><span class="emoji">🏗️</span>Architecture Overview</h2>
+        <p class="section-intro">
+            LSM Tree is a write-optimized data structure that achieves high write throughput by converting random writes into sequential writes, using a multi-level architecture with in-memory and on-disk components.
+        </p>
+
+        <div class="architecture-box">
+            <h3>Core Components</h3>
+            <h4>Memory Components (RAM)</h4>
+            <ul>
+                <li><strong>MemTable (Active)</strong> - Currently accepting writes, typically implemented as Skip List or Red-Black Tree (64-256 MB)</li>
+                <li><strong>Immutable MemTable</strong> - Full MemTable being flushed to disk, read-only but still queryable</li>
+            </ul>
+
+            <h4>Disk Components (SSD/HDD)</h4>
+            <ul>
+                <li><strong>Level 0 (L0)</strong> - Direct flush target from MemTable, files have overlapping key ranges</li>
+                <li><strong>Level 1+ (L1, L2, L3...)</strong> - Created through compaction, files have non-overlapping key ranges within each level</li>
+            </ul>
+        </div>
+
+        <div class="visual-diagram">
+┌─────────────────────────────────────────────────┐
+│                RAM (Fast)                       │
+├─────────────────────────────────────────────────┤
+│ MemTable (Active) - 64MB                        │
+│ [Sorted in-memory structure]                    │
+├─────────────────────────────────────────────────┤
+│ Immutable MemTable - 64MB (Being flushed)       │
+└─────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────┐
+│              DISK (Persistent)                  │
+├─────────────────────────────────────────────────┤
+│ L0: 256MB (4 files, OVERLAPPING ranges)         │
+│   SSTable-1.sst, SSTable-2.sst, ...             │
+├─────────────────────────────────────────────────┤
+│ L1: 2GB (8 files, NON-OVERLAPPING)              │
+│   Each file covers distinct key range           │
+├─────────────────────────────────────────────────┤
+│ L2: 20GB (10 files, NON-OVERLAPPING)            │
+│   10x larger than L1                            │
+├─────────────────────────────────────────────────┤
+│ L3: 200GB (10 files, NON-OVERLAPPING)           │
+│   10x larger than L2                            │
+└─────────────────────────────────────────────────┘
+        </div>
+
+        <div class="key-point">
+            <strong>Key Design Principle:</strong> Write once to WAL (sequential), write to MemTable (RAM fast), batch flush to disk (sequential), compact in background to maintain read performance.
+        </div>
+
+        <!-- WRITE OPERATION -->
+        <h2 id="write-operation"><span class="emoji">✍️</span>Write Operation</h2>
+        <p class="section-intro">
+            Writes are optimized for speed by first appending to a Write-Ahead Log (WAL) for durability, then inserting into an in-memory structure, returning immediately to the user.
+        </p>
+
+        <div class="flow-box">
+            <h3>Write Flow (Step-by-Step)</h3>
+            <ol>
+                <li>
+                    <strong>Write-Ahead Log (WAL)</strong>
+                    <ul>
+                        <li>Append operation to sequential log file on disk</li>
+                        <li>Format: [timestamp][operation_type][key][value][checksum]</li>
+                        <li>Call <span class="highlight">fsync()</span> to force data from OS page cache to physical disk</li>
+                        <li>Ensures durability - survives crashes</li>
+                        <li>Time: 1-10ms (dominated by disk I/O)</li>
+                    </ul>
+                </li>
+                <li>
+                    <strong>MemTable Insertion</strong>
+                    <ul>
+                        <li>Insert key-value pair into sorted in-memory structure (Skip List)</li>
+                        <li>O(log n) time complexity</li>
+                        <li>Purely in RAM - extremely fast</li>
+                        <li>Time: 1-10 microseconds</li>
+                    </ul>
+                </li>
+                <li>
+                    <strong>Return Success</strong>
+                    <ul>
+                        <li>Write is considered complete once WAL and MemTable are updated</li>
+                        <li>Total latency: 1-10ms (WAL fsync dominates)</li>
+                    </ul>
+                </li>
+            </ol>
+        </div>
+
+        <div class="component-box">
+            <h4>OS-Level Details</h4>
+            <ul>
+                <li><strong>Sequential Write:</strong> WAL is append-only, maximizes disk throughput (100-200 MB/s on HDD)</li>
+                <li><strong>fsync():</strong> System call that flushes OS page cache to physical storage, ensures durability</li>
+                <li><strong>Page Cache:</strong> OS buffers disk writes in RAM first, fsync() forces immediate write</li>
+                <li><strong>HDD Advantage:</strong> Sequential writes avoid expensive seek time (5-10ms per seek)</li>
+            </ul>
+        </div>
+
+        <h3>MemTable Flush (Background Process)</h3>
+        <div class="flow-box">
+            <p><strong>Trigger:</strong> When MemTable reaches size threshold (e.g., 64MB)</p>
+            <ol>
+                <li>
+                    <strong>Freeze Current MemTable</strong>
+                    <ul>
+                        <li>Atomic pointer swap to new MemTable</li>
+                        <li>Old MemTable becomes "immutable"</li>
+                        <li>New writes go to new MemTable - no write blocking!</li>
+                    </ul>
+                </li>
+                <li>
+                    <strong>Serialize to SSTable</strong>
+                    <ul>
+                        <li>Walk through MemTable in sorted order (already sorted!)</li>
+                        <li>Write entries to new SSTable file on disk</li>
+                        <li>Build Bloom filter for negative lookups</li>
+                        <li>Build index for binary search</li>
+                        <li>Sequential disk write - very fast</li>
+                    </ul>
+                </li>
+                <li>
+                    <strong>Atomic Update</strong>
+                    <ul>
+                        <li>Write to temporary file first</li>
+                        <li>fsync() to ensure durability</li>
+                        <li>Atomic rename to make visible</li>
+                        <li>Update manifest file (database metadata)</li>
+                    </ul>
+                </li>
+                <li>
+                    <strong>Cleanup</strong>
+                    <ul>
+                        <li>Free immutable MemTable from RAM</li>
+                        <li>Truncate WAL (entries now durable in SSTable)</li>
+                    </ul>
+                </li>
+            </ol>
+        </div>
+
+        <!-- READ OPERATION -->
+        <h2 id="read-operation"><span class="emoji">📖</span>Read Operation</h2>
+        <p class="section-intro">
+            Reads must check multiple locations (MemTable, immutable MemTable, and multiple SSTable files across levels) to find the most recent version of a key.
+        </p>
+
+        <div class="flow-box">
+            <h3>Read Flow (Step-by-Step)</h3>
+            <ol>
+                <li>
+                    <strong>Check Active MemTable</strong>
+                    <ul>
+                        <li>Search in-memory Skip List</li>
+                        <li>O(log n) lookup</li>
+                        <li>Time: 1-10 microseconds</li>
+                        <li>If found: Return immediately (most recent data)</li>
+                    </ul>
+                </li>
+                <li>
+                    <strong>Check Immutable MemTable</strong>
+                    <ul>
+                        <li>If exists (during flush), search it too</li>
+                        <li>Same process as active MemTable</li>
+                    </ul>
+                </li>
+                <li>
+                    <strong>Check L0 SSTables (Must check ALL files)</strong>
+                    <ul>
+                        <li><strong>Problem:</strong> L0 files have overlapping key ranges</li>
+                        <li><strong>Solution:</strong> Must check every L0 file</li>
+                        <li>For each file:
+                            <ol>
+                                <li><strong>Bloom Filter Check</strong> (in RAM, 100ns)
+                                    <ul>
+                                        <li>If returns "definitely not present" → Skip file entirely</li>
+                                        <li>If returns "maybe present" → Continue to next step</li>
+                                    </ul>
+                                </li>
+                                <li><strong>Index Lookup</strong> (in RAM, 1μs)
+                                    <ul>
+                                        <li>Binary search index to find which data block might contain key</li>
+                                    </ul>
+                                </li>
+                                <li><strong>Read Data Block</strong> (disk I/O)
+                                    <ul>
+                                        <li>Read 4-64 KB block from disk</li>
+                                        <li>HDD: 10-15ms (seek + rotation + transfer)</li>
+                                        <li>SSD: 0.1-0.2ms</li>
+                                    </ul>
+                                </li>
+                                <li><strong>Decompress Block</strong> (if compressed)
+                                    <ul>
+                                        <li>Snappy/LZ4/Zstd decompression</li>
+                                        <li>Time: 100 microseconds for 64KB</li>
+                                    </ul>
+                                </li>
+                                <li><strong>Binary Search Within Block</strong>
+                                    <ul>
+                                        <li>Search sorted entries in block</li>
+                                        <li>Time: 1-5 microseconds</li>
+                                    </ul>
+                                </li>
+                            </ol>
+                        </li>
+                        <li>Keep track of latest version if found in multiple files (compare timestamps)</li>
+                    </ul>
+                </li>
+                <li>
+                    <strong>Check L1, L2, L3... (One file per level)</strong>
+                    <ul>
+                        <li><strong>Advantage:</strong> Non-overlapping ranges, only 1 file per level needs checking</li>
+                        <li>Binary search level manifest to identify target file</li>
+                        <li>Same Bloom filter → Index → Read block process</li>
+                    </ul>
+                </li>
+                <li>
+                    <strong>Return Result</strong>
+                    <ul>
+                        <li>Return value with highest timestamp</li>
+                        <li>If tombstone found: Return "key not found"</li>
+                    </ul>
+                </li>
+            </ol>
+        </div>
+
+        <div class="warning-box">
+            <h4>Read Amplification</h4>
+            <p><strong>Definition:</strong> Number of disk reads required to serve one logical read request.</p>
+            <p><strong>Example:</strong> If checking 4 L0 files + 1 L1 file + 1 L2 file = 6 disk reads for 1 user query = 6x read amplification</p>
+            <p><strong>Mitigation:</strong></p>
+            <ul>
+                <li>Bloom filters eliminate 95%+ of unnecessary reads</li>
+                <li>OS page cache keeps hot data in RAM</li>
+                <li>Block cache for frequently accessed blocks</li>
+                <li>Limit L0 file count (trigger compaction early)</li>
+            </ul>
+        </div>
+
+        <div class="component-box">
+            <h4>OS-Level Details</h4>
+            <ul>
+                <li><strong>Random Reads:</strong> Each SSTable block read requires separate disk seek</li>
+                <li><strong>HDD Penalty:</strong> Random reads are slow (5-10ms seek + 4ms rotation per read)</li>
+                <li><strong>SSD Advantage:</strong> No mechanical parts, random reads much faster (0.1-0.2ms)</li>
+                <li><strong>Page Cache:</strong> OS caches recently read blocks in RAM, subsequent reads are fast</li>
+            </ul>
+        </div>
+
+        <!-- DELETE OPERATION -->
+        <h2 id="delete-operation"><span class="emoji">🗑️</span>Delete Operation</h2>
+        <p class="section-intro">
+            Deletes don't immediately remove data (SSTables are immutable). Instead, a tombstone marker is written, which shadows older versions during reads.
+        </p>
+
+        <div class="flow-box">
+            <h3>Tombstone Mechanism</h3>
+            <ol>
+                <li>
+                    <strong>Write Tombstone</strong>
+                    <ul>
+                        <li>Same process as regular write</li>
+                        <li>WAL: Append DELETE entry</li>
+                        <li>MemTable: Insert special tombstone marker with timestamp</li>
+                        <li>Tombstone is just another key-value pair with deletion flag</li>
+                    </ul>
+                </li>
+                <li>
+                    <strong>Read After Delete</strong>
+                    <ul>
+                        <li>When searching for key, may find both tombstone and old value</li>
+                        <li>Compare timestamps: If tombstone is newer, return "not found"</li>
+                        <li>Tombstone shadows all older versions</li>
+                    </ul>
+                </li>
+                <li>
+                    <strong>Physical Deletion (During Compaction)</strong>
+                    <ul>
+                        <li>Tombstones removed when compacting to lower levels</li>
+                        <li>Condition: All older versions must be merged/removed first</li>
+                        <li>Frees disk space over time</li>
+                    </ul>
+                </li>
+            </ol>
+        </div>
+
+        <div class="key-point">
+            <strong>Why Tombstones?</strong> SSTables are immutable (cannot modify). Writing a tombstone maintains write performance (append-only) while logically deleting the key. Physical deletion happens later during compaction.
+        </div>
+
+        <!-- COMPACTION -->
+        <h2 id="compaction"><span class="emoji">🔄</span>Compaction Process</h2>
+        <p class="section-intro">
+            Compaction is the background process that merges SSTables to remove duplicates, delete tombstones, and organize data into non-overlapping levels for efficient reads.
+        </p>
+
+        <div class="component-box">
+            <h3>Why Compaction is Necessary</h3>
+            <ul>
+                <li><strong>Read Amplification:</strong> Too many L0 files slow down reads</li>
+                <li><strong>Space Amplification:</strong> Multiple versions of same key + tombstones waste space</li>
+                <li><strong>File Proliferation:</strong> Thousands of small files cause overhead</li>
+            </ul>
+        </div>
+
+        <h3>Compaction Strategies</h3>
+
+        <h4>1. Size-Tiered Compaction</h4>
+        <div class="flow-box">
+            <p><strong>Trigger:</strong> When N files of similar size exist (e.g., 4 files of ~4MB each)</p>
+            <p><strong>Process:</strong></p>
+            <ol>
+                <li>Read all N files into memory</li>
+                <li>Perform K-way merge sort</li>
+                <li>Remove duplicate keys (keep latest timestamp)</li>
+                <li>Remove tombstones (if safe)</li>
+                <li>Write single larger merged file</li>
+            </ol>
+            <p><strong>Result:</strong> 4 × 4MB files → 1 × 16MB file</p>
+            <p><strong>Write Amplification:</strong> Read 16MB, Write 16MB = 2x</p>
+        </div>
+
+        <h4>2. Leveled Compaction (RocksDB/LevelDB)</h4>
+        <div class="flow-box">
+            <p><strong>Structure:</strong> Each level is 10x larger than previous, files within level don't overlap</p>
+            <p><strong>Trigger:</strong> When level exceeds size threshold</p>
+            <p><strong>Process:</strong></p>
+            <ol>
+                <li>Select one SSTable from upper level (e.g., L0)</li>
+                <li>Identify ALL overlapping SSTables in lower level (e.g., L1)</li>
+                <li>Merge selected files via K-way merge</li>
+                <li>Write new non-overlapping SSTables to lower level</li>
+                <li>Delete old SSTables</li>
+            </ol>
+            <p><strong>Example:</strong> Compact 64MB from L0 with 512MB from L1 = read 576MB, write ~500MB</p>
+            <p><strong>Write Amplification:</strong> ~8-10x per level</p>
+        </div>
+
+        <h4>3. Time-Window Compaction</h4>
+        <div class="flow-box">
+            <p><strong>Use Case:</strong> Time-series data with TTL (Time To Live)</p>
+            <p><strong>Organization:</strong> Files organized by time windows</p>
+            <p><strong>Deletion:</strong> When time window expires, drop entire file (no merge needed)</p>
+            <p><strong>Advantage:</strong> Ultra-fast deletion for expired data</p>
+        </div>
+
+        <h3>Compaction: Detailed Merge Process</h3>
+        <div class="visual-diagram">
+K-Way Merge Algorithm:
+
+Input Streams (sorted):
+  Stream-1 (L0): [k:100, k:150, k:500, k:1000]
+  Stream-2 (L0): [k:10, k:100, k:600, k:2000]
+  Stream-3 (L1): [k:50, k:100, k:500, k:700]
+
+Process:
+1. Use min-heap with head element from each stream
+2. Extract minimum key
+3. If same key from multiple streams: Keep newest (highest timestamp)
+4. Output to new SSTable
+5. Advance pointer in source stream
+6. Repeat until all streams exhausted
+
+Output (merged):
+  [k:10, k:50, k:100 (newest), k:150, k:500 (newest), 
+   k:600, k:700, k:1000, k:2000]
+        </div>
+
+        <div class="warning-box">
+            <h4>Compaction Overhead</h4>
+            <ul>
+                <li><strong>CPU:</strong> Continuous merge-sorting consumes CPU cycles</li>
+                <li><strong>Disk I/O:</strong> Background reads/writes compete with user requests</li>
+                <li><strong>Memory:</strong> Buffers for merge operations</li>
+                <li><strong>Write Amplification:</strong> Same data written multiple times (10-50x total)</li>
+                <li><strong>Write Stalls:</strong> If compaction can't keep up with writes, writes are throttled or stopped</li>
+            </ul>
+        </div>
+
+        <!-- LEVELS -->
+        <h2 id="levels"><span class="emoji">📊</span>Level Structure (L0, L1, L2...)</h2>
+        <p class="section-intro">
+            LSM Tree organizes data into multiple levels with exponentially increasing sizes. Each level has different characteristics regarding key range overlap and file organization.
+        </p>
+
+        <h3>Level 0 (L0) - The Chaotic Starting Point</h3>
+        <div class="component-box">
+            <h4>Characteristics</h4>
+            <ul>
+                <li><strong>Source:</strong> Direct destination of MemTable flushes</li>
+                <li><strong>Key Ranges:</strong> OVERLAPPING between files</li>
+                <li><strong>Sorting:</strong> Sorted within each file, but NOT across files</li>
+                <li><strong>File Count:</strong> Limited to 4-12 files (triggers compaction when exceeded)</li>
+                <li><strong>Size:</strong> Typically 256MB total (4 × 64MB files)</li>
+            </ul>
+        </div>
+
+        <div class="visual-diagram">
+Key Space:  0    1000   2000   3000   4000   5000   6000   7000
+           |------|------|------|------|------|------|------|
+
+L0 Files:
+SSTable-001:    [=============================]
+SSTable-002:  [====================================]
+SSTable-003:              [===================]
+SSTable-004:[==============]
+
+ALL FILES OVERLAP! Key "1500" might be in any of these files.
+        </div>
+
+        <div class="key-point">
+            <h4>Why Overlap Exists in L0</h4>
+            <p>MemTable flushes are <strong>snapshots of time</strong>, not snapshots of key space. Keys written at different times end up in different L0 files, naturally creating overlap. This is unavoidable while maintaining fast sequential writes.</p>
+        </div>
+
+        <div class="warning-box">
+            <h4>The L0 Read Problem</h4>
+            <p>Since files overlap, reads must check ALL L0 files. With 10 L0 files @ 10ms per read = 100ms for single lookup on HDD!</p>
+            <p><strong>Solution:</strong> Limit L0 file count and compact quickly to L1</p>
+        </div>
+
+        <h3>Level 1+ (L1, L2, L3...) - Organized Hierarchy</h3>
+        <div class="comparison-box">
+            <h4>Characteristics</h4>
+            <ul>
+                <li><strong>Source:</strong> Created through compaction from upper levels</li>
+                <li><strong>Key Ranges:</strong> NON-OVERLAPPING within each level</li>
+                <li><strong>File Organization:</strong> Each file covers distinct key range</li>
+                <li><strong>Size Growth:</strong> Each level is 10x larger than previous</li>
+                <li><strong>Example:</strong>
+                    <ul>
+                        <li>L1: 2GB (256MB per file × 8 files)</li>
+                        <li>L2: 20GB (2GB per file × 10 files)</li>
+                        <li>L3: 200GB (20GB per file × 10 files)</li>
+                    </ul>
+                </li>
+            </ul>
+        </div>
+
+        <div class="visual-diagram">
+L1 Structure (NON-OVERLAPPING):
+
+Key Space:  0    1000   2000   3000   4000   5000   6000   7000
+           |------|------|------|------|------|------|------|
+
+L1 Files:
+File-01: [0 ─── 1000]
+File-02:           [1001 ─── 2000]
+File-03:                      [2001 ─── 3000]
+File-04:                                 [3001 ─── 4000]
+
+NO OVERLAP! Key "1500" is ONLY in File-02.
+        </div>
+
+        <h3>How Compaction Creates Non-Overlapping Levels</h3>
+        <div class="flow-box">
+            <p><strong>L0 → L1 Compaction Process:</strong></p>
+            <ol>
+                <li><strong>Select ALL L0 files</strong> (they all overlap anyway)</li>
+                <li><strong>Identify overlapping L1 files</strong> (if L1 already has data)</li>
+                <li><strong>K-way merge</strong> all selected files
+                    <ul>
+                        <li>Remove duplicate keys (keep latest)</li>
+                        <li>Remove tombstones (if safe)</li>
+                        <li>Produce sorted output</li>
+                    </ul>
+                </li>
+                <li><strong>Partition output</strong> into fixed-size files (e.g., 256MB each) with disjoint key ranges</li>
+                <li><strong>Atomic update:</strong> Delete old files, add new files to manifest</li>
+            </ol>
+        </div>
+
+        <div class="key-point">
+            <h4>The Magic of Non-Overlapping Files</h4>
+            <p><strong>Read Performance:</strong> With non-overlapping ranges, binary search the level's manifest to identify exactly ONE file that might contain the key.</p>
+            <p><strong>Before (L0):</strong> Must check all 10 files = 10 disk reads</p>
+            <p><strong>After (L1):</strong> Check only 1 file = 1 disk read</p>
+            <p><strong>Speedup:</strong> 10x faster!</p>
+        </div>
+
+        <h3>Why Multiple Levels Are Needed</h3>
+        <div class="component-box">
+            <h4>Problem Without Multiple Levels</h4>
+            <p>If only L0 and L1 existed, L1 would grow unbounded:</p>
+            <ul>
+                <li>L1 grows from 2GB → 50GB → 200GB over time</li>
+                <li>800 files in L1 = huge manifest, RAM for Bloom filters</li>
+                <li>Compacting L0 → L1 with 800 files = read 200GB!</li>
+            </ul>
+        </div>
+
+        <div class="comparison-box">
+            <h4>Solution: Exponential Level Growth</h4>
+            <p><strong>L0:</strong> 256MB (4 files)</p>
+            <p><strong>L1:</strong> 2GB (8 files) - 10x L0</p>
+            <p><strong>L2:</strong> 20GB (10 files) - 10x L1</p>
+            <p><strong>L3:</strong> 200GB (10 files) - 10x L2</p>
+            <p><strong>L4:</strong> 2TB (10 files) - 10x L3</p>
+
+            <h4>Benefits</h4>
+            <ul>
+                <li><strong>Bounded file count per level:</strong> ~10 files per level</li>
+                <li><strong>Bounded memory:</strong> ~100-200 MB Bloom filters per level</li>
+                <li><strong>Incremental compaction:</strong> Compact 256MB at a time, not 200GB</li>
+                <li><strong>Logarithmic read amplification:</strong> log₁₀(total_size) levels to check</li>
+            </ul>
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Level</th>
+                    <th>Size</th>
+                    <th>File Count</th>
+                    <th>Overlap?</th>
+                    <th>Files to Check per Read</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>L0</td>
+                    <td>256 MB</td>
+                    <td>4</td>
+                    <td>YES</td>
+                    <td>ALL (4 files)</td>
+                </tr>
+                <tr>
+                    <td>L1</td>
+                    <td>2 GB</td>
+                    <td>8</td>
+                    <td>NO</td>
+                    <td>1 file</td>
+                </tr>
+                <tr>
+                    <td>L2</td>
+                    <td>20 GB</td>
+                    <td>10</td>
+                    <td>NO</td>
+                    <td>1 file</td>
+                </tr>
+                <tr>
+                    <td>L3</td>
+                    <td>200 GB</td>
+                    <td>10</td>
+                    <td>NO</td>
+                    <td>1 file</td>
+                </tr>
+                <tr>
+                    <td>L4</td>
+                    <td>2 TB</td>
+                    <td>10</td>
+                    <td>NO</td>
+                    <td>1 file</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="key-point">
+            <strong>Read Amplification with Levels:</strong> For 1TB database: 4 (L0) + 1 (L1) + 1 (L2) + 1 (L3) + 1 (L4) = 8 disk reads maximum
+        </div>
+
+        <!-- MEMTABLE -->
+        <h2 id="memtable"><span class="emoji">💾</span>MemTable Structure</h2>
+        <p class="section-intro">
+            MemTable is the in-memory sorted data structure that accepts writes at RAM speed. Most commonly implemented as a Skip List for optimal performance characteristics.
+        </p>
+
+        <div class="architecture-box">
+            <h3>MemTable Contents</h3>
+            <ul>
+                <li><strong>Key-Value Pairs:</strong> User data stored as sorted entries</li>
+                <li><strong>Timestamps:</strong> Each entry has write timestamp (for versioning)</li>
+                <li><strong>Tombstones:</strong> Deletion markers for deleted keys</li>
+                <li><strong>Size Limit:</strong> Typically 64-256 MB</li>
+                <li><strong>Implementation:</strong> Skip List, Red-Black Tree, or AVL Tree</li>
+            </ul>
+        </div>
+
+        <h3>Skip List Implementation</h3>
+        <div class="component-box">
+            <h4>Why Skip List?</h4>
+            <ul>
+                <li><strong>O(log n)</strong> insert, delete, search operations</li>
+                <li><strong>Simpler than balanced trees</strong> (no rotations)</li>
+                <li><strong>Lock-free implementation possible</strong> (for concurrent access)</li>
+                <li><strong>Better cache locality</strong> than pointer-heavy trees</li>
+                <li><strong>Probabilistic balancing</strong> via random heights</li>
+            </ul>
+        </div>
+
+        <div class="visual-diagram">
+Skip List Structure:
+
+Level 3: HEAD --------------------------------→ 50 ------→ NULL
+Level 2: HEAD ----------→ 20 ----------------→ 50 → 80 → NULL
+Level 1: HEAD ----→ 10 → 20 → 35 → 50 → 60 → 80 → 90 → NULL
+Level 0: HEAD → 5 → 10 → 20 → 25 → 35 → 40 → 50 → 60 → 80 → 90 → NULL
+
+- Level 0 contains all elements (fully linked list)
+- Higher levels skip elements (express lanes)
+- Random height per node (50% chance of each level)
+        </div>
+
+        <h4>Skip List Node Structure</h4>
+        <div class="flow-box">
+            <p><strong>Node Components:</strong></p>
+            <ul>
+                <li><strong>Key:</strong> Variable-length string (pointer + length)</li>
+                <li><strong>Value:</strong> Variable-length data (pointer + length)</li>
+                <li><strong>Timestamp:</strong> 64-bit microsecond timestamp</li>
+                <li><strong>Tombstone Flag:</strong> 1 byte (0 = normal, 1 = deleted)</li>
+                <li><strong>Height:</strong> Number of levels for this node</li>
+                <li><strong>Forward Pointers:</strong> Array of pointers to next nodes at each level</li>
+            </ul>
+        </div>
+
+        <h4>Skip List Operations</h4>
+        <div class="flow-box">
+            <p><strong>Insert:</strong></p>
+            <ol>
+                <li>Search for insertion point (start from top level, move right/down)</li>
+                <li>Record update pointers at each level</li>
+                <li>Generate random height for new node</li>
+                <li>Create node and insert at all levels</li>
+            </ol>
+
+            <p><strong>Search:</strong></p>
+            <ol>
+                <li>Start at highest level of head node</li>
+                <li>Move right while next key < target</li>
+                <li>Drop down one level and repeat</li>
+                <li>At level 0, check if found</li>
+            </ol>
+
+            <p><strong>Range Scan:</strong></p>
+            <ol>
+                <li>Search for start key (same as point search)</li>
+                <li>Walk forward at level 0 until end key</li>
+                <li>Skip tombstones during iteration</li>
+            </ol>
+        </div>
+
+        <h3>MemTable Memory Layout</h3>
+        <div class="visual-diagram">
+MemTable in RAM (64 MB):
+
+┌──────────────────────────────────────────────┐
+│ SkipList Metadata (64 bytes)                 │
+│ - Head pointer                               │
+│ - Max height                                 │
+│ - Size counter                               │
+│ - Memory usage                               │
+│ - Lock (if needed)                           │
+├──────────────────────────────────────────────┤
+│ Node 1: key="user:1001", value="Alice"       │
+│         height=1, timestamp=T1               │
+├──────────────────────────────────────────────┤
+│ Node 2: key="user:1002", value="Bob"         │
+│         height=3, timestamp=T2               │
+├──────────────────────────────────────────────┤
+│ ... (thousands of nodes)                     │
+├──────────────────────────────────────────────┤
+│ Total Memory: ~64 MB                         │
+│ - Node overhead: ~64 bytes per node          │
+│ - Key storage: variable                      │
+│ - Value storage: variable                    │
+└──────────────────────────────────────────────┘
+        </div>
+
+        <div class="key-point">
+            <strong>Memory Efficiency:</strong> Skip List has ~50-100 bytes overhead per entry. For 1M entries with 100-byte avg key+value, total memory: ~150-200 MB
+        </div>
+
+        <!-- SSTABLE -->
+        <h2 id="sstable"><span class="emoji">📄</span>SSTable Structure</h2>
+        <p class="section-intro">
+            SSTable (Sorted String Table) is an immutable on-disk file format containing sorted key-value pairs, optimized for sequential writes and efficient reads via indexing.
+        </p>
+
+        <div class="visual-diagram">
+SSTable File Layout:
+
+┌─────────────────────────────────────────────┐
+│ FILE HEADER (64 bytes)                      │
+│ - Magic number                              │
+│ - Version                                   │
+│ - Compression type                          │
+│ - Number of entries                         │
+│ - Min/Max timestamps                        │
+├─────────────────────────────────────────────┤
+│ DATA BLOCKS (Variable size)                 │
+│                                             │
+│ ┌─────────────────────────────────────────┐ │
+│ │ Data Block 0 (4-64 KB)                  │ │
+│ │ - Multiple key-value entries            │ │
+│ │ - Prefix-compressed keys                │ │
+│ │ - Restart points for binary search      │ │
+│ │ - Block checksum                        │ │
+│ └─────────────────────────────────────────┘ │
+│                                             │
+│ ┌─────────────────────────────────────────┐ │
+│ │ Data Block 1                            │ │
+│ │ ...                                     │ │
+│ └─────────────────────────────────────────┘ │
+│                                             │
+├─────────────────────────────────────────────┤
+│ META BLOCKS                                 │
+│ - Bloom filter                              │
+│ - Statistics                                │
+│ - Properties                                │
+├─────────────────────────────────────────────┤
+│ INDEX BLOCK                                 │
+│ - Maps key ranges to data block offsets     │
+│ - Enables binary search                     │
+├─────────────────────────────────────────────┤
+│ METAINDEX BLOCK                             │
+│ - Directory of meta blocks                  │
+│ - Maps names to offsets                     │
+├─────────────────────────────────────────────┤
+│ FOOTER (48 bytes)                           │
+│ - Metaindex offset                          │
+│ - Index offset                              │
+│ - Magic number                              │
+│ - Checksum                                  │
+└─────────────────────────────────────────────┘
+
+Note: Footer is ALWAYS at end of file (fixed position)
+        </div>
+
+        <h3>SSTable Components</h3>
+
+        <h4>1. File Header</h4>
+        <div class="component-box">
+            <ul>
+                <li><strong>Magic Number:</strong> Identifies file as SSTable (e.g., 0x5353544142 "SSTAB")</li>
+                <li><strong>Version:</strong> File format version for compatibility</li>
+                <li><strong>Compression:</strong> Algorithm used (None, Snappy, LZ4, Zstd)</li>
+                <li><strong>Entry Count:</strong> Total key-value pairs in file</li>
+                <li><strong>Timestamp Range:</strong> Min/max timestamps for filtering</li>
+            </ul>
+        </div>
+
+        <h4>2. Data Blocks</h4>
+        <div class="component-box">
+            <p><strong>Structure:</strong> Fixed-size blocks (typically 4-64 KB) containing sorted key-value entries</p>
+            <p><strong>Key Optimization - Prefix Compression:</strong></p>
+            <ul>
+                <li>Instead of storing full key, store shared prefix length + unique suffix</li>
+                <li>Example:
+                    <ul>
+                        <li>Key 1: "user:1001:name" (full: 15 bytes)</li>
+                        <li>Key 2: "user:1001:email" → Stored as: [shared=10][suffix=":email" 6 bytes]</li>
+                        <li>Key 3: "user:1001:phone" → Stored as: [shared=10][suffix=":phone" 6 bytes]</li>
+                        <li><strong>Savings:</strong> 15+15+15=45 bytes → 15+6+6=27 bytes (40% reduction!)</li>
+                    </ul>
+                </li>
+            </ul>
+
+            <p><strong>Restart Points:</strong></p>
+            <ul>
+                <li>Every N entries (e.g., 16), store full key (no compression)</li>
+                <li>Enables binary search within compressed block</li>
+                <li>Trade-off: Slight space overhead for much faster search</li>
+            </ul>
+
+            <p><strong>Entry Format:</strong></p>
+            <ul>
+                <li>Shared key length (varint)</li>
+                <li>Unshared key length (varint)</li>
+                <li>Value length (varint)</li>
+                <li>Unshared key bytes</li>
+                <li>Value bytes</li>
+                <li>Timestamp (8 bytes)</li>
+                <li>Tombstone flag (1 byte)</li>
+            </ul>
+        </div>
+
+        <h4>3. Index Block</h4>
+        <div class="component-box">
+            <p><strong>Purpose:</strong> Maps key ranges to data block offsets, enabling binary search</p>
+            <p><strong>Content:</strong> For each data block, store:
+                <ul>
+                    <li><strong>Separator Key:</strong> Largest key in block (or shortest key between blocks)</li>
+                    <li><strong>Block Offset:</strong> File position of data block</li>
+                    <li><strong>Block Size:</strong> Size of data block in bytes</li>
+                </ul>
+            </p>
+            <p><strong>Example:</strong></p>
+        </div>
+
+        <div class="visual-diagram">
+Index Block:
+┌─────────────────────────────────────────┐
+│ Entry 0: key="user:1000"                │
+│          offset=64, size=4096           │
+├─────────────────────────────────────────┤
+│ Entry 1: key="user:2000"                │
+│          offset=4160, size=4096         │
+├─────────────────────────────────────────┤
+│ Entry 2: key="user:3000"                │
+│          offset=8256, size=4096         │
+└─────────────────────────────────────────┘
+
+Binary search for "user:1500":
+- Compare with entry[1]: 1500 < 2000
+- Compare with entry[0]: 1500 > 1000
+- Result: Key is in block 1 (offset 4160)
+        </div>
+
+        <h4>4. Meta Blocks</h4>
+        <div class="component-box">
+            <p><strong>Contains:</strong></p>
+            <ul>
+                <li><strong>Bloom Filter:</strong> Probabilistic set for negative lookups</li>
+                <li><strong>Statistics:</strong> Key count, data size, compression ratio</li>
+                <li><strong>Properties:</strong> Custom metadata</li>
+            </ul>
+        </div>
+
+        <h4>5. Metaindex Block</h4>
+        <div class="component-box">
+            <p><strong>Purpose:</strong> Directory of meta blocks (maps name → offset)</p>
+            <p><strong>Example Entries:</strong></p>
+            <ul>
+                <li>"filter.bloom" → offset=2500000, size=1250000</li>
+                <li>"stats" → offset=3750000, size=1024</li>
+                <li>"properties" → offset=3751024, size=512</li>
+            </ul>
+        </div>
+
+        <h4>6. Footer</h4>
+        <div class="component-box">
+            <p><strong>Location:</strong> Always at end of file (last 48 bytes)</p>
+            <p><strong>Contents:</strong></p>
+            <ul>
+                <li>Metaindex block offset</li>
+                <li>Index block offset</li>
+                <li>Magic number</li>
+                <li>Footer checksum</li>
+            </ul>
+            <p><strong>Why at end?</strong> Allows writing file sequentially (header → data → index → footer), then reading footer first to locate index</p>
+        </div>
+
+        <h3>Reading from SSTable</h3>
+        <div class="flow-box">
+            <ol>
+                <li><strong>Open SSTable:</strong>
+                    <ul>
+                        <li>Read footer (seek to file_size - 48 bytes)</li>
+                        <li>Validate magic number and checksum</li>
+                        <li>Load index block into RAM (using offset from footer)</li>
+                        <li>Load metaindex block into RAM</li>
+                        <li>Load Bloom filter into RAM (using metaindex)</li>
+                    </ul>
+                </li>
+                <li><strong>Lookup Key:</strong>
+                    <ul>
+                        <li>Check Bloom filter (100 ns)</li>
+                        <li>If "definitely not present" → return immediately</li>
+                        <li>Binary search index to find data block (1 μs)</li>
+                        <li>Read data block from disk (10ms HDD / 0.2ms SSD)</li>
+                        <li>Verify checksum</li>
+                        <li>Decompress block if needed (100 μs)</li>
+                        <li>Binary search restart points</li>
+                        <li>Linear scan from restart point</li>
+                    </ul>
+                </li>
+            </ol>
+        </div>
+
+        <h3>Writing SSTable</h3>
+        <div class="flow-box">
+            <ol>
+                <li><strong>Initialize:</strong> Write header placeholder, create Bloom filter</li>
+                <li><strong>Add Entries:</strong> Iterate MemTable in sorted order
+                    <ul>
+                        <li>Add key-value pairs to current data block</li>
+                        <li>Apply prefix compression</li>
+                        <li>Insert key into Bloom filter</li>
+                        <li>When block reaches size limit, flush to disk</li>
+                        <li>Record block offset in index</li>
+                    </ul>
+                </li>
+                <li><strong>Finalize:</strong>
+                    <ul>
+                        <li>Write remaining data block</li>
+                        <li>Write Bloom filter to meta block</li>
+                        <li>Write metaindex block</li>
+                        <li>Write index block</li>
+                        <li>Write footer</li>
+                        <li>Update header with actual values</li>
+                        <li>fsync() to disk</li>
+                    </ul>
+                </li>
+                <li><strong>Atomic Activation:</strong> Rename from temp file to final name</li>
+            </ol>
+        </div>
+
+        <div class="key-point">
+            <strong>Immutability:</strong> Once written, SSTables are never modified. This enables:
+            <ul>
+                <li>Safe concurrent reads (no locking)</li>
+                <li>Sequential writes (optimal for HDD)</li>
+                <li>Simple crash recovery</li>
+                <li>Efficient caching</li>
+            </ul>
+        </div>
+
+        <!-- BLOOM FILTER -->
+        <h2 id="bloom-filter"><span class="emoji">🌸</span>Bloom Filters</h2>
+        <p class="section-intro">
+            Bloom Filter is a space-efficient probabilistic data structure that tests whether an element is a member of a set. It can definitively say "not present" but only say "maybe present" (false positives possible).
+        </p>
+
+        <div class="architecture-box">
+            <h3>Core Concept</h3>
+            <p><strong>Data Structure:</strong> Fixed-size bit array + k hash functions</p>
+            <p><strong>Operations:</strong></p>
+            <ul>
+                <li><strong>Insert:</strong> Hash key with k functions, set k bits to 1</li>
+                <li><strong>Lookup:</strong> Hash key with k functions, check if all k bits are 1</li>
+            </ul>
+            <p><strong>Guarantees:</strong></p>
+            <ul>
+                <li><strong>Zero False Negatives:</strong> If element was inserted, Bloom filter will always say "maybe present"</li>
+                <li><strong>Possible False Positives:</strong> If element was NOT inserted, Bloom filter might still say "maybe present" (bits set by other keys)</li>
+            </ul>
+        </div>
+
+        <h3>Bloom Filter Algorithm</h3>
+
+        <h4>Insert Operation</h4>
+        <div class="visual-diagram">
+Insert key="user:1001":
+
+Bit Array (m=16 bits): [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+
+Step 1: h1("user:1001") % 16 = 15
+        Set bit[15] = 1
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]
+
+Step 2: h2("user:1001") % 16 = 12
+        Set bit[12] = 1
+        [0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,1]
+
+Step 3: h3("user:1001") % 16 = 13
+        Set bit[13] = 1
+        [0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,1]
+
+Key "user:1001" now has 3 bits set (12, 13, 15)
+        </div>
+
+        <h4>Lookup Operation</h4>
+        <div class="visual-diagram">
+Current Bit Array: [0,1,0,1,0,1,0,1,0,0,0,0,1,1,0,1]
+
+Query: Is "user:9999" present?
+h1("user:9999") % 16 = 2  → bit[2] = 0 ✗
+
+Result: DEFINITELY NOT PRESENT (stop immediately!)
+
+Query: Is "user:5555" present? (was never inserted)
+h1("user:5555") % 16 = 3  → bit[3] = 1 ✓
+h2("user:5555") % 16 = 7  → bit[7] = 1 ✓
+h3("user:5555") % 16 = 13 → bit[13] = 1 ✓
+
+Result: MAYBE PRESENT (FALSE POSITIVE!)
+(All bits happened to be set by other keys)
+        </div>
+
+        <h3>Configuration & False Positive Rate</h3>
+        <div class="component-box">
+            <p><strong>Parameters:</strong></p>
+            <ul>
+                <li><strong>m:</strong> Number of bits in array</li>
+                <li><strong>n:</strong> Number of keys inserted</li>
+                <li><strong>k:</strong> Number of hash functions</li>
+            </ul>
+
+            <p><strong>False Positive Probability:</strong></p>
+            <p style="text-align: center; font-size: 1.2em; font-family: monospace;">
+                P = (1 - e^(-kn/m))^k
+            </p>
+
+            <p><strong>Optimal k:</strong></p>
+            <p style="text-align: center; font-size: 1.2em; font-family: monospace;">
+                k = (m/n) × ln(2) ≈ 0.69 × (m/n)
+            </p>
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Bits per Key (m/n)</th>
+                    <th>Hash Functions (k)</th>
+                    <th>False Positive Rate</th>
+                    <th>Space for 1M keys</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>4</td>
+                    <td>3</td>
+                    <td>~9%</td>
+                    <td>500 KB</td>
+                </tr>
+                <tr>
+                    <td>8</td>
+                    <td>6</td>
+                    <td>~2%</td>
+                    <td>1 MB</td>
+                </tr>
+                <tr>
+                    <td>10</td>
+                    <td>7</td>
+                    <td>~0.8%</td>
+                    <td>1.25 MB</td>
+                </tr>
+                <tr>
+                    <td>16</td>
+                    <td>11</td>
+                    <td>~0.1%</td>
+                    <td>2 MB</td>
+                </tr>
+                <tr>
+                    <td>20</td>
+                    <td>14</td>
+                    <td>~0.003%</td>
+                    <td>2.5 MB</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="key-point">
+            <strong>Typical Configuration:</strong> 10 bits per key with 7 hash functions gives ~1% false positive rate. For 1 million keys, Bloom filter is only 1.25 MB!
+        </div>
+
+        <h3>Impact on LSM Tree Performance</h3>
+        <div class="comparison-box">
+            <h4>Without Bloom Filter</h4>
+            <p><strong>Scenario:</strong> Search for non-existent key in 10 L0 SSTables</p>
+            <ul>
+                <li>Check 10 files: 10 × 10ms (HDD) = 100ms</li>
+                <li>All disk reads are wasted (key doesn't exist!)</li>
+            </ul>
+
+            <h4>With Bloom Filter (1% FP rate)</h4>
+            <ul>
+                <li>Check 10 Bloom filters: 10 × 100ns = 1 μs</li>
+                <li>9-10 filters say "definitely not present" → skip disk read</li>
+                <li>0-1 false positive → 1 disk read: 10ms</li>
+                <li><strong>Total:</strong> 1 μs + 10ms ≈ 10ms (10x faster!)</li>
+            </ul>
+
+            <p><strong>Space Cost:</strong> 10 files × 1.25MB = 12.5 MB in RAM</p>
+            <p><strong>Speedup:</strong> Eliminates 90-99% of unnecessary disk reads</p>
+        </div>
+
+        <h3>Hash Function Implementation</h3>
+        <div class="component-box">
+            <p><strong>Common Approach: Double Hashing</strong></p>
+            <ul>
+                <li>Compute 2 strong hashes: h1(key) and h2(key)</li>
+                <li>Derive k hashes: h_i(key) = (h1 + i × h2) % m</li>
+                <li>Avoids computing k separate expensive hashes</li>
+            </ul>
+
+            <p><strong>Popular Hash Functions:</strong></p>
+            <ul>
+                <li>MurmurHash3 (fast, good distribution)</li>
+                <li>CityHash (Google, optimized for x86)</li>
+                <li>xxHash (extremely fast)</li>
+            </ul>
+        </div>
+
+        <h3>Advanced: Blocked Bloom Filters</h3>
+        <div class="component-box">
+            <p><strong>Problem:</strong> One Bloom filter per SSTable file (covers all blocks)</p>
+            <p><strong>Solution:</strong> One small Bloom filter per data block</p>
+            <p><strong>Advantages:</strong></p>
+            <ul>
+                <li>More precise: Only check relevant block's Bloom filter</li>
+                <li>Lower false positive rate (fewer keys per filter)</li>
+                <li>Can skip even within a file that index says might have key</li>
+            </ul>
+            <p><strong>Trade-off:</strong> Slightly more memory for multiple filters</p>
+        </div>
+
+        <!-- COMPARISON -->
+        <h2 id="comparison"><span class="emoji">⚖️</span>LSM Tree vs B+ Tree</h2>
+        <p class="section-intro">
+            LSM Trees and B+ Trees represent fundamentally different trade-offs: write-optimized (LSM) vs read-optimized (B+ Tree). The choice depends on workload characteristics and storage medium.
+        </p>
+
+        <h3>Performance Comparison</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Aspect</th>
+                    <th>LSM Tree</th>
+                    <th>B+ Tree</th>
+                    <th>Winner</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Write Throughput (HDD)</strong></td>
+                    <td>50,000-500,000 ops/sec<br><small>Sequential writes</small></td>
+                    <td>100-10,000 ops/sec<br><small>Random writes</small></td>
+                    <td style="background: #d4edda;">LSM (50-100x)</td>
+                </tr>
+                <tr>
+                    <td><strong>Write Throughput (SSD)</strong></td>
+                    <td>100,000-1M ops/sec</td>
+                    <td>50,000-200,000 ops/sec</td>
+                    <td style="background: #d4edda;">LSM (5-10x)</td>
+                </tr>
+                <tr>
+                    <td><strong>Random Point Read</strong></td>
+                    <td>100μs - 10ms<br><small>Check multiple levels</small></td>
+                    <td>10μs - 1ms<br><small>Single tree traversal</small></td>
+                    <td style="background: #d4edda;">B+ Tree (10x)</td>
+                </tr>
+                <tr>
+                    <td><strong>Range Scan</strong></td>
+                    <td>Slow<br><small>Merge multiple levels</small></td>
+                    <td>Fast<br><small>Sequential leaf scan</small></td>
+                    <td style="background: #d4edda;">B+ Tree</td>
+                </tr>
+                <tr>
+                    <td><strong>Write Amplification</strong></td>
+                    <td>10-50x<br><small>Multiple compactions</small></td>
+                    <td>4-8x<br><small>Page updates</small></td>
+                    <td style="background: #d4edda;">B+ Tree</td>
+                </tr>
+                <tr>
+                    <td><strong>Read Amplification</strong></td>
+                    <td>4-20x<br><small>Multiple level checks</small></td>
+                    <td>1x<br><small>Direct tree path</small></td>
+                    <td style="background: #d4edda;">B+ Tree</td>
+                </tr>
+                <tr>
+                    <td><strong>Space Amplification</strong></td>
+                    <td>1.2-3x<br><small>Old versions + tombstones</small></td>
+                    <td>1.1-1.5x<br><small>In-place updates</small></td>
+                    <td style="background: #d4edda;">B+ Tree</td>
+                </tr>
+                <tr>
+                    <td><strong>HDD Performance</strong></td>
+                    <td>Excellent<br><small>Optimized for sequential I/O</small></td>
+                    <td>Poor<br><small>Random writes are slow</small></td>
+                    <td style="background: #d4edda;">LSM Tree</td>
+                </tr>
+                <tr>
+                    <td><strong>SSD Performance</strong></td>
+                    <td>Good<br><small>Still benefits from sequential</small></td>
+                    <td>Good<br><small>Random I/O acceptable</small></td>
+                    <td style="background: #fff3cd;">Tie</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3>Advantages of LSM Tree</h3>
+        <div class="comparison-box">
+            <h4>✓ Superior Write Performance</h4>
+            <p>Sequential writes are 50-100x faster than random writes on HDD. LSM converts all writes to sequential via WAL and batch flushes.</p>
+
+            <h4>✓ Optimized for HDD</h4>
+            <p>HDDs have expensive seek time (5-10ms). LSM's sequential write pattern avoids seeks, maximizing throughput (100-200 MB/s).</p>
+
+            <h4>✓ Write-Heavy Workloads</h4>
+            <p>Ideal for logging, metrics collection, IoT sensor data, time-series data - anything with high write volume.</p>
+
+            <h4>✓ Better Compression</h4>
+            <p>Immutable SSTables can be heavily compressed. Similar keys group together, improving compression ratios.</p>
+
+            <h4>✓ Simple Concurrency</h4>
+            <p>Immutable files enable lock-free reads. No read-write conflicts on disk structures.</p>
+        </div>
+
+        <h3>Disadvantages of LSM Tree</h3>
+        <div class="warning-box">
+            <h4>✗ Read Amplification</h4>
+            <p>Must check multiple levels (4-20 disk reads per query). Mitigated by Bloom filters and caching but still slower than B+ tree.</p>
+
+            <h4>✗ Write Amplification</h4>
+            <p>Same data written 10-50x during compactions. Increases disk I/O load, shortens SSD lifespan (wear leveling).</p>
+
+            <h4>✗ Compaction Overhead</h4>
+            <ul>
+                <li><strong>CPU:</strong> Continuous background merge-sorting</li>
+                <li><strong>Disk I/O:</strong> Background reads/writes compete with foreground</li>
+                <li><strong>Unpredictable Latency:</strong> P99 latency can spike during major compactions</li>
+            </ul>
+
+            <h4>✗ Space Amplification</h4>
+            <p>Multiple versions exist until compacted. Need 2x space during compaction (old + new files).</p>
+
+            <h4>✗ Write Stalls</h4>
+            <p>If compaction can't keep up with writes, system throttles or stops writes entirely. Causes timeouts.</p>
+
+            <h4>✗ Complexity</h4>
+            <p>Many tuning parameters: compaction strategy, level sizes, compression, Bloom filter bits, etc. Difficult to optimize.</p>
+        </div>
+
+        <h3>Advantages of B+ Tree</h3>
+        <div class="comparison-box">
+            <h4>✓ Fast Point Reads</h4>
+            <p>Single tree traversal (3-4 levels). Each node is one disk read. Total: ~10μs - 1ms.</p>
+
+            <h4>✓ Excellent Range Scans</h4>
+            <p>Leaf nodes are linked list. Sequential scan from start to end key. Very fast on SSD.</p>
+
+            <h4>✓ Lower Space Usage</h4>
+            <p>In-place updates mean no old versions. Deletes free space immediately. Space amplification: 1.1-1.5x.</p>
+
+            <h4>✓ Predictable Performance</h4>
+            <p>No background compaction causing latency spikes. Consistent P50/P99 latencies.</p>
+
+            <h4>✓ ACID Transactions</h4>
+            <p>Easier to implement strong consistency and transactions with in-place update model.</p>
+
+            <h4>✓ Simpler Implementation</h4>
+            <p>Well-understood data structure. Fewer tuning knobs. Easier to reason about.</p>
+        </div>
+
+        <h3>Disadvantages of B+ Tree</h3>
+        <div class="warning-box">
+            <h4>✗ Poor Write Performance on HDD</h4>
+            <p>Each write requires random disk seek. At 100 IOPS, only 100 writes/sec. LSM is 50-100x faster.</p>
+
+            <h4>✗ Write Amplification</h4>
+            <p>Updating 1 byte requires writing entire 4KB page. Multiple page updates for tree rebalancing.</p>
+
+            <h4>✗ Fragmentation</h4>
+            <p>Deletions leave gaps. Requires periodic VACUUM/defragmentation. LSM rewrites during compaction naturally.</p>
+
+            <h4>✗ Write Locks</h4>
+            <p>In-place updates require locking. Writers block readers during modifications (though modern implementations minimize this).</p>
+        </div>
+
+        <h3>Use Cases</h3>
+        <div class="architecture-box">
+            <h4>Choose LSM Tree For:</h4>
+            <ul>
+                <li><strong>Write-Heavy Workloads:</strong> Logging systems, metrics collection, event streams</li>
+                <li><strong>Time-Series Data:</strong> Sensor data, monitoring, analytics</li>
+                <li><strong>Large Sequential Writes:</strong> Data ingestion pipelines, ETL</li>
+                <li><strong>HDD Storage:</strong> Maximize sequential write throughput</li>
+                <li><strong>Append-Only Patterns:</strong> Audit logs, blockchain ledgers</li>
+            </ul>
+            <p><strong>Examples:</strong> Cassandra, HBase, RocksDB, LevelDB, ScyllaDB, InfluxDB, OpenTSDB</p>
+        </div>
+
+        <div class="architecture-box">
+            <h4>Choose B+ Tree For:</h4>
+            <ul>
+                <li><strong>Read-Heavy Workloads:</strong> OLTP databases, user profiles</li>
+                <li><strong>Random Point Queries:</strong> Key-value lookups, secondary indexes</li>
+                <li><strong>Range Scans:</strong> Reporting queries, analytics</li>
+                <li><strong>ACID Transactions:</strong> Financial systems, e-commerce</li>
+                <li><strong>Space-Constrained:</strong> Lower space amplification</li>
+                <li><strong>SSD Storage:</strong> Random writes acceptable on SSD</li>
+            </ul>
+            <p><strong>Examples:</strong> MySQL (InnoDB), PostgreSQL, SQLite, SQL Server, Oracle</p>
+        </div>
+
+        <h3>OS-Level Considerations</h3>
+        <div class="component-box">
+            <h4>Sequential vs Random I/O</h4>
+            <ul>
+                <li><strong>Sequential Write (LSM):</strong>
+                    <ul>
+                        <li>HDD: One initial seek, then continuous transfer at 100-200 MB/s</li>
+                        <li>SSD: Optimal for flash memory, reduces write amplification</li>
+                        <li>OS can predict and optimize (read-ahead, write-behind)</li>
+                    </ul>
+                </li>
+                <li><strong>Random Write (B+ Tree):</strong>
+                    <ul>
+                        <li>HDD: Each write requires seek (5-10ms) + rotation (4ms) = ~10ms overhead</li>
+                        <li>SSD: Still has overhead, fragments flash blocks</li>
+                        <li>OS cannot predict, no optimization</li>
+                    </ul>
+                </li>
+            </ul>
+
+            <h4>Page Cache Impact</h4>
+            <ul>
+                <li><strong>LSM:</strong> Sequential writes pollute page cache less. Reads benefit from caching hot L0/L1 blocks.</li>
+                <li><strong>B+ Tree:</strong> Tree nodes stay hot in cache. Benefits from high cache hit rate.</li>
+            </ul>
+
+            <h4>fsync() Cost</h4>
+            <ul>
+                <li><strong>LSM:</strong> fsync() on WAL (small, sequential) is fast. Batch many writes before one fsync.</li>
+                <li><strong>B+ Tree:</strong> fsync() after each transaction (random pages) is slow. Group commit helps but still slower.</li>
+            </ul>
+        </div>
+
+        <h2 style="text-align: center; margin-top: 60px; color: #667eea;">Summary</h2>
+        <div class="key-point" style="font-size: 1.1em;">
+            <p><strong>LSM Tree</strong> trades read performance and complexity for exceptional write throughput via sequential I/O. Best for write-heavy workloads, especially on HDDs.</p>
+            <p><strong>B+ Tree</strong> provides fast reads and range scans with predictable performance. Best for read-heavy transactional workloads.</p>
+            <p style="margin-top: 15px; text-align: center; font-style: italic;">The optimal choice depends on your workload, storage medium, and performance requirements.</p>
+        </div>
+
+        <footer style="text-align: center; margin-top: 50px; padding: 30px; background: #f8f9fa; border-radius: 10px; color: #666;">
+            <p style="font-size: 1.2em; font-weight: 600; color: #667eea;">LSM Tree Deep Dive</p>
+            <p>Architecture, Operations & Implementation Details</p>
+            <p style="margin-top: 10px; font-size: 0.9em;">Understanding the write-optimized data structure powering modern NoSQL databases</p>
+        </footer>
+    </div>
+</body>
+</html>
